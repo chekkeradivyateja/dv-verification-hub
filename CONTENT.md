@@ -82,6 +82,22 @@ npm run generate-og
 Generated PNGs land in `public/og/` (gitignored — they're build output, not
 source).
 
+## Regenerating the lead-magnet PDF
+
+The free cheat-sheet PDF at `public/downloads/dv-interview-cheatsheet.pdf` is
+generated straight from `lib/questions.ts`, so it can never drift out of sync
+with the on-site question bank. Whenever you add/edit questions there,
+regenerate it with:
+
+```bash
+npm run generate-cheatsheet
+```
+
+This is a checked-in file (not gitignored) — commit the updated PDF after
+regenerating it. The script lives at `scripts/generate-cheatsheet.ts` and uses
+`pdfkit`; edit it directly if you want to change the PDF's layout, add a
+cover-page blurb, etc.
+
 ## Things you will NOT need to touch for routine content updates
 
 - `app/layout.tsx`, `app/globals.css` — site chrome/theme
