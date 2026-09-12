@@ -21,9 +21,8 @@ export const GUMROAD_DOC_URLS: Record<string, string> = {
   python: GUMROAD_BUNDLE_URL,
 };
 
-// Buttondown newsletter username -- create a free account at
-// https://buttondown.email and replace this. See CONTENT.md / punch list.
-export const BUTTONDOWN_USERNAME = "YOUR_BUTTONDOWN_USERNAME";
+// Buttondown newsletter username -- https://dvverificationhub.buttondown.email
+export const BUTTONDOWN_USERNAME = "dvverificationhub";
 
 export const BUTTONDOWN_FORM_ACTION = `https://buttondown.email/api/emails/embed-subscribe/${BUTTONDOWN_USERNAME}`;
 
