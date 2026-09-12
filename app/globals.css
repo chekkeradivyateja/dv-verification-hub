@@ -1,26 +1,155 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #060809;
+  --surface: #0d1117;
+  --surface-raised: #131a22;
+  --border: #1f2933;
+  --foreground: #e6edf3;
+  --muted: #8b98a5;
+  --accent: #2dd4bf;
+  --accent-strong: #5eead4;
+  --accent-soft: rgba(45, 212, 191, 0.12);
+  --signal: #4ade80;
+  --warn: #fbbf24;
+  --font-geist-sans: var(--font-geist-sans);
+  --font-geist-mono: var(--font-geist-mono);
 }
 
 @theme inline {
   --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-border: var(--border);
   --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-soft: var(--accent-soft);
+  --color-signal: var(--signal);
+  --color-warn: var(--warn);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+  background-image:
+    radial-gradient(ellipse 80% 50% at 50% -20%, rgba(45, 212, 191, 0.08), transparent);
+  background-repeat: no-repeat;
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.prose-dv {
+  color: var(--foreground);
+  max-width: 72ch;
+}
+
+.prose-dv h2 {
+  font-size: 1.4rem;
+  font-weight: 600;
+  margin-top: 2.5rem;
+  margin-bottom: 1rem;
+  color: var(--foreground);
+  letter-spacing: -0.01em;
+}
+
+.prose-dv h3 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin-top: 2rem;
+  margin-bottom: 0.75rem;
+  color: var(--foreground);
+}
+
+.prose-dv p {
+  margin-bottom: 1.1rem;
+  line-height: 1.75;
+  color: #c8d1da;
+}
+
+.prose-dv ul,
+.prose-dv ol {
+  margin-bottom: 1.1rem;
+  padding-left: 1.4rem;
+  color: #c8d1da;
+  line-height: 1.75;
+}
+
+.prose-dv li {
+  margin-bottom: 0.4rem;
+}
+
+.prose-dv ul {
+  list-style-type: disc;
+}
+
+.prose-dv ol {
+  list-style-type: decimal;
+}
+
+.prose-dv strong {
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.prose-dv code {
+  font-family: var(--font-mono), monospace;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.3rem;
+  font-size: 0.85em;
+  color: var(--accent-strong);
+}
+
+.prose-dv pre {
+  margin-bottom: 1.5rem;
+}
+
+.prose-dv pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font-size: 0.85rem;
+}
+
+.prose-dv a {
+  color: var(--accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.prose-dv table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1.5rem;
+  font-size: 0.9rem;
+}
+
+.prose-dv th,
+.prose-dv td {
+  border: 1px solid var(--border);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+
+.prose-dv th {
+  background: var(--surface-raised);
+  color: var(--foreground);
+}
+
+.prose-dv blockquote {
+  border-left: 3px solid var(--accent);
+  padding-left: 1rem;
+  color: var(--muted);
+  margin-bottom: 1.1rem;
+  font-style: italic;
 }

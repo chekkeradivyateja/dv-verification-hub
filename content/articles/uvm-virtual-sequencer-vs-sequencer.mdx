@@ -1,0 +1,121 @@
+---
+title: "UVM Virtual Sequencer vs Sequencer Explained"
+description: "Why multi-interface environments need a virtual sequencer, how it coordinates sequences across agents without owning any driver, and a worked example."
+topic: "uvm"
+date: "2026-01-22"
+keywords: ["uvm virtual sequencer example", "virtual sequencer vs sequencer", "uvm virtual sequence"]
+---
+
+A regular `uvm_sequencer` talks to exactly one driver over one sequence item
+type. The moment your test needs to coordinate stimulus across *multiple*
+agents — say, drive a config register over APB while streaming data over
+AXI, in a specific relative order — a plain sequencer can't express that, and
+that's the exact gap a virtual sequencer fills.
+
+## What a virtual sequencer actually is
+
+A virtual sequencer is a `uvm_sequencer` that **owns no driver connection of
+its own**. Its only job is to hold handles to the *real* sequencers in your
+environment, so a sequence running on it can reach into any of them:
+
+```systemverilog
+class virtual_sqr extends uvm_sequencer;
+  `uvm_component_utils(virtual_sqr)
+
+  apb_sequencer apb_sqr;
+  axi_sequencer axi_sqr;
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+  endfunction
+endclass
+```
+
+Note the parameter list is empty — it's not `uvm_sequencer #(some_item)`,
+because the virtual sequencer never produces or consumes sequence items
+itself. It's pure coordination.
+
+## Wiring it up
+
+```systemverilog
+class top_env extends uvm_env;
+  `uvm_component_utils(top_env)
+
+  apb_agent    apb_ag;
+  axi_agent    axi_ag;
+  virtual_sqr  v_sqr;
+
+  function void build_phase(uvm_phase phase);
+    apb_ag = apb_agent::type_id::create("apb_ag", this);
+    axi_ag = axi_agent::type_id::create("axi_ag", this);
+    v_sqr  = virtual_sqr::type_id::create("v_sqr", this);
+  endfunction
+
+  function void connect_phase(uvm_phase phase);
+    v_sqr.apb_sqr = apb_ag.sequencer;
+    v_sqr.axi_sqr = axi_ag.sequencer;
+  endfunction
+endclass
+```
+
+The virtual sequencer just holds references — the actual `apb_agent` and
+`axi_agent` sequencers still exist, still connect to their own drivers, and
+still work exactly as they would without a virtual sequencer present.
+
+## The virtual sequence: where coordination happens
+
+```systemverilog
+class config_then_stream_vseq extends uvm_sequence;
+  `uvm_object_utils(config_then_stream_vseq)
+  `uvm_declare_p_sequencer(virtual_sqr)
+
+  function new(string name = "config_then_stream_vseq");
+    super.new(name);
+  endfunction
+
+  task body();
+    apb_config_seq  cfg_seq  = apb_config_seq::type_id::create("cfg_seq");
+    axi_stream_seq  data_seq = axi_stream_seq::type_id::create("data_seq");
+
+    // configure the DUT over APB first...
+    cfg_seq.start(p_sequencer.apb_sqr);
+
+    // ...only then start streaming data over AXI
+    data_seq.start(p_sequencer.axi_sqr);
+  endtask
+endclass
+```
+
+`` `uvm_declare_p_sequencer(virtual_sqr) `` generates a typed `p_sequencer`
+handle so `body()` can reach `p_sequencer.apb_sqr` and `p_sequencer.axi_sqr`
+directly, instead of manually casting `m_sequencer`. This is the standard
+pattern for any sequence meant to run on a virtual sequencer.
+
+Running both sub-sequences in parallel instead of sequentially is just as
+easy — use `fork`/`join` around the two `.start()` calls instead of calling
+them back to back, if the scenario calls for simultaneous rather than
+ordered stimulus.
+
+## Why not just start both sequences from the test directly?
+
+You could call `cfg_seq.start(apb_ag.sequencer)` and
+`data_seq.start(axi_ag.sequencer)` straight from a test, and for two
+sequences that's not unreasonable. Virtual sequences earn their keep once the
+coordination logic itself becomes something you want to reuse: complex
+orderings, conditional branching based on one protocol's response before
+driving the other, or scenarios reused across many tests. Putting that logic
+in a virtual sequence keeps it testable and reusable independent of any one
+test, the same reason regular sequences exist instead of writing stimulus
+inline in `run_phase`.
+
+## Interview-ready summary
+
+- A **sequencer** arbitrates and forwards items to one driver, for one item
+  type.
+- A **virtual sequencer** drives no interface itself — it holds handles to
+  real sequencers so a **virtual sequence** can coordinate stimulus across
+  multiple agents/protocols.
+- `` `uvm_declare_p_sequencer(virtual_sqr_type) `` is what gives a virtual
+  sequence a typed handle to reach the real sequencers.
+- Use a virtual sequencer the moment a test scenario needs cross-protocol
+  ordering or coordination, not just "multiple agents running independently."

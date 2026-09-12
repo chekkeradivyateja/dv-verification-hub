@@ -1,0 +1,99 @@
+---
+title: "UVM config_db vs resource_db: When to Use Which"
+description: "uvm_config_db is layered on top of uvm_resource_db with hierarchy-aware precedence rules. Here's what that actually means for set/get calls in practice."
+topic: "uvm"
+date: "2026-01-20"
+keywords: ["uvm config_db vs resource_db", "uvm_config_db example", "uvm_resource_db example"]
+---
+
+`uvm_config_db` is the one nearly every UVM engineer uses daily.
+`uvm_resource_db` is the thing underneath it that almost nobody calls
+directly — and interviewers ask about the difference specifically to check
+whether you understand *why* `config_db` looks the way it does.
+
+## The relationship: config_db is built on resource_db
+
+`uvm_resource_db` is the lower-level storage mechanism: a global,
+type-and-string-keyed database of "resources." `uvm_config_db` is a thin
+wrapper around it that adds **hierarchical scoping** — `set()` calls in
+`config_db` are effectively resource_db entries tagged with a context path
+(like `"env.agent.*"`), and `get()` calls resolve against that hierarchy with
+well-defined precedence rules.
+
+```systemverilog
+// config_db - hierarchy aware
+uvm_config_db#(virtual axi_lite_if)::set(this, "env.agent.*", "vif", vif);
+
+// resource_db - no hierarchy, just a global name
+uvm_resource_db#(virtual axi_lite_if)::set("env.agent.*", "vif", vif, this);
+```
+
+Both calls end up storing into the same underlying pool. The difference is
+in how `get()` resolves which stored value wins when multiple `set()` calls
+could match.
+
+## Why the hierarchy in config_db matters
+
+```systemverilog
+// in the test
+uvm_config_db#(int)::set(this, "*", "num_txns", 100);
+
+// deeper in the hierarchy, more specific path wins
+uvm_config_db#(int)::set(this, "env.agent1.*", "num_txns", 50);
+```
+
+When `env.agent1.sequencer` calls `get(this, "", "num_txns", val)`,
+`config_db` resolves it using **path specificity and set order**: more
+specific paths and later `set()` calls generally take precedence over
+broader/earlier ones. This is exactly the mechanism that lets a test override
+one specific agent's configuration without touching every other agent — the
+same idea as a factory instance override, but for data instead of class
+type.
+
+`uvm_resource_db` has no concept of this hierarchy-based precedence beyond
+plain string matching; it's really meant to be used as `config_db`'s engine,
+not as a daily-driver API.
+
+## The get() call and why the `this` argument matters
+
+```systemverilog
+function void build_phase(uvm_phase phase);
+  if (!uvm_config_db#(virtual axi_lite_if)::get(this, "", "vif", vif))
+    `uvm_fatal("NOVIF", "vif not found in config_db")
+endfunction
+```
+
+Passing `this` lets `config_db` walk up from the calling component's actual
+position in the hierarchy to find matching `set()` calls, using the
+component's real instance path — not a string you have to hand-type and keep
+in sync as the hierarchy changes. The empty string `""` for the *instance
+name* argument means "match against my own full path," which is the normal
+case; you'd only pass a non-empty instance name if you were fetching config
+data on behalf of a child that hasn't been constructed yet.
+
+## When you'd actually reach for resource_db directly
+
+In practice, almost never in day-to-day environment code — but it shows up
+when you need functionality `config_db` doesn't expose directly, such as:
+
+- Iterating over *all* resources matching a name/scope pattern for debug
+  tooling (`uvm_resource_db#(T)::dump()`-style introspection).
+- Read-only "default value" resources meant to be visible regardless of
+  hierarchy, where you deliberately don't want scoping semantics.
+
+If you're setting up a normal testbench, this is a strong signal you should
+default to `config_db`, and reach for `resource_db` only when you have a
+specific reason.
+
+## Interview-ready summary
+
+- `uvm_config_db` is a hierarchy-aware wrapper around `uvm_resource_db`;
+  they share the same underlying storage.
+- `config_db::set(this, "path", "field", value)` scopes the value to a
+  context path; `get()` resolves using specificity/order, which is what
+  makes per-instance overrides possible.
+- `resource_db` has no hierarchy-based precedence — it's the low-level
+  engine, not the intended day-to-day API.
+- Default to `config_db` for virtual interfaces, config objects, and knobs;
+  only use `resource_db` directly for introspection or deliberately
+  non-scoped defaults.

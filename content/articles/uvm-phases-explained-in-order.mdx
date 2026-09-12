@@ -1,0 +1,126 @@
+---
+title: "UVM Phases Explained in Order (build_phase to report_phase)"
+description: "Every UVM phase in execution order, what each one is actually for, which ones run top-down vs bottom-up, and the mistakes that come from using the wrong one."
+topic: "uvm"
+date: "2026-01-24"
+keywords: ["uvm phases explained", "uvm phases in order", "build_phase connect_phase run_phase"]
+---
+
+UVM phasing exists so that every component in a testbench — regardless of who
+wrote it — constructs, connects, and runs in a predictable, synchronized
+order. Getting phase order wrong is one of the most common sources of
+"random" UVM bugs (a virtual interface that's null, a connection made before
+the thing it's connecting to exists).
+
+## The full order
+
+```
+build_phase        (top-down)
+connect_phase       (bottom-up)
+end_of_elaboration  (bottom-up)
+start_of_simulation (bottom-up)
+run_phase           (parallel, time-consuming — this is where simulation time passes)
+extract_phase       (bottom-up)
+check_phase         (bottom-up)
+report_phase        (bottom-up)
+final_phase         (bottom-up)
+```
+
+`run_phase` (and its sub-phases: `reset_phase`, `configure_phase`,
+`main_phase`, `shutdown_phase`, etc. — the "runtime" phases) is the only
+group where simulation time actually advances. Every phase before and after
+it executes in zero simulation time, back to back.
+
+## build_phase — top-down, construct everything
+
+```systemverilog
+function void build_phase(uvm_phase phase);
+  super.build_phase(phase);
+  agent = axi_agent::type_id::create("agent", this);
+  sb    = scoreboard::type_id::create("sb", this);
+endfunction
+```
+
+Top-down means a parent's `build_phase` runs *before* its children's — which
+is exactly why factory overrides and `config_db::set()` calls made in a
+test's `build_phase` are visible to components built further down the
+hierarchy afterward. If you tried to set a config value in a child's
+`build_phase` and read it in a parent's, it wouldn't be there yet — the
+parent already ran.
+
+## connect_phase — bottom-up, wire up TLM ports
+
+```systemverilog
+function void connect_phase(uvm_phase phase);
+  monitor.item_collected_port.connect(scoreboard.item_export);
+endfunction
+```
+
+Bottom-up here matters because by the time a parent's `connect_phase` runs,
+every child underneath it has already finished constructing *and* connecting
+its own internal ports — so the parent can safely wire together sub-blocks
+that are each already internally consistent.
+
+## end_of_elaboration_phase — last chance to inspect/tweak the topology
+
+Common uses: printing the testbench topology (`uvm_top.print_topology()`),
+or making last corrections to component handles after everything exists but
+before anything has started running.
+
+## start_of_simulation_phase — last chance before time advances
+
+Common uses: printing configuration summaries, checking that virtual
+interfaces were actually set (raising a fatal here beats discovering a null
+`vif` when the driver tries to use it in `run_phase`).
+
+## run_phase — where the test actually executes
+
+```systemverilog
+task run_phase(uvm_phase phase);
+  phase.raise_objection(this);
+  seq.start(sequencer);
+  phase.drop_objection(this);
+endtask
+```
+
+`run_phase` (and siblings) is a `task`, not a `function` — everything before
+it is a zero-time `function` specifically because nothing before `run_phase`
+is supposed to consume simulation time. Objections (`raise_objection` /
+`drop_objection`) are what keep `run_phase` from ending the instant it
+starts — without at least one component raising an objection, the phase (and
+often the whole test) exits immediately.
+
+## extract_phase / check_phase / report_phase — after time stops
+
+- **extract_phase**: pull final data out of components (e.g., final coverage
+  numbers) into a form other phases can use.
+- **check_phase**: verify end-of-test conditions (queues empty, no
+  outstanding transactions, expected counts met).
+- **report_phase**: print the final pass/fail summary — this is where a
+  scoreboard typically reports its match/mismatch counts.
+
+## final_phase — absolute last, for cleanup only
+
+Closing file handles, final housekeeping — nothing test-logic-related
+belongs here.
+
+## The mistake this order prevents
+
+If you connect analysis ports in `build_phase` instead of `connect_phase`,
+you're relying on child components already existing — but `build_phase` is
+top-down, so a parent's `build_phase` runs *before* its children are built.
+The port you're trying to connect literally doesn't exist yet. This is the
+single most common "why is my connection null" bug in UVM, and the fix is
+always the same: move the `.connect()` call into `connect_phase`.
+
+## Interview-ready summary
+
+- `build_phase`: top-down, construct components — do factory
+  overrides/config_db sets here, in a parent, before children build.
+- `connect_phase`: bottom-up, wire TLM ports — children are guaranteed to
+  exist and be internally connected already.
+- `run_phase`: the only phase group where simulation time passes; gated by
+  objections.
+- `report_phase`: prints final results; runs after time has stopped.
+- Getting build vs connect backwards is the classic cause of null-handle
+  bugs in UVM.

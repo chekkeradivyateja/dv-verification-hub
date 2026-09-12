@@ -1,0 +1,107 @@
+---
+title: "Functional Coverage vs Code Coverage in VLSI Verification"
+description: "What each coverage type actually measures, why 100% code coverage says nothing about correctness, and how the two are used together to decide when verification is done."
+topic: "coverage"
+date: "2026-01-26"
+keywords: ["functional coverage vs code coverage", "code coverage vlsi", "verification coverage metrics"]
+---
+
+Both are answers to the same underlying question — "have we tested enough?"
+— but they measure completely different things, and conflating them is a
+fast way to fail a verification interview question.
+
+## Code coverage: did the simulator exercise the RTL?
+
+Code coverage is generated automatically by the simulator from the RTL
+itself, with no test-writer input required. The common types:
+
+- **Statement/line coverage** — was each line of RTL executed at least once?
+- **Branch coverage** — was each branch of every `if`/`case` taken, in both
+  directions?
+- **Toggle coverage** — did each individual bit of each signal toggle both
+  0→1 and 1→0?
+- **FSM coverage** — was every state visited, and (more usefully) every
+  legal state *transition* taken?
+- **Expression coverage** — for a condition like `if (a && b)`, were all
+  combinations of `a`/`b` that affect the outcome actually exercised (this
+  overlaps with MC/DC-style coverage used in safety-critical flows)?
+
+Because it's derived purely from the RTL's structure, code coverage tells
+you *where your stimulus touched the design*, but nothing about whether the
+design's *behavior* was correct in each case, or whether the values that hit
+each line were the interesting ones.
+
+```systemverilog
+if (fifo_full)
+  reject_write <= 1'b1;   // statement coverage: was this line ever run?
+else
+  reject_write <= 1'b0;   // branch coverage: was the else taken too?
+```
+
+100% statement/branch coverage here only proves the FIFO was both full and
+not-full at some point during the run — not that you tested the exact cycle
+the FIFO transitions from almost-full to full under back-to-back writes,
+which is usually where the actual bugs live.
+
+## Functional coverage: did we test the scenarios that matter?
+
+Functional coverage is **hand-written by the verification engineer**, using
+`covergroup`/`coverpoint`/`cross` (see our
+[covergroup syntax guide](/articles/systemverilog-covergroup-syntax) for the
+mechanics), to track whether specific, meaningful scenarios from the
+verification plan were exercised:
+
+```systemverilog
+covergroup fifo_cg @(posedge clk);
+  cp_state: coverpoint {fifo_empty, fifo_full} {
+    bins empty      = {2'b10};
+    bins full       = {2'b01};
+    bins mid        = {2'b00};
+    illegal_bins bad = {2'b11}; // can't be both empty and full
+  }
+  cp_backtoback_at_full: coverpoint (fifo_full && wr_en);
+endgroup
+```
+
+This directly encodes a verification-plan requirement — "hit the FIFO full
+condition, and specifically try writing while full" — that no code-coverage
+tool could ever infer on its own, because it requires domain knowledge about
+what's actually risky in this design.
+
+## Why you need both
+
+| | Code coverage | Functional coverage |
+|---|---|---|
+| Who writes it | Nobody — tool-generated from RTL | The verification engineer, from the verification plan |
+| Measures | Was this RTL structure exercised | Was this specific scenario exercised |
+| Catches | Dead code, untested branches/states | Missing test scenarios, corner cases, protocol-specific conditions |
+| Blind spot | Says nothing about scenario intent or correctness | Only as good as the verification plan — won't catch scenarios nobody thought of |
+| Can hit 100% and still ship a bug? | Yes, easily | Yes, if the plan itself has gaps |
+
+A DUT can hit 100% statement and branch coverage from a handful of directed
+tests that never triggered a single interesting corner case — code coverage
+has no concept of "this combination of conditions is the dangerous one."
+Conversely, functional coverage is only as good as the plan behind it: if
+nobody thought to add a coverpoint for simultaneous read/write on an empty
+FIFO, it will never show up as a coverage hole, even at 100%.
+
+## How they're actually used together in sign-off
+
+In practice, verification closure is judged against **both**, plus assertion
+coverage: code coverage as a safety net to catch RTL that was never
+exercised at all (often revealing dead logic or missing stimulus classes),
+and functional coverage as the primary signal for "did we test what the
+verification plan said we needed to test." Neither one alone is considered
+sufficient for tape-out sign-off on any serious project.
+
+## Interview-ready summary
+
+- **Code coverage** is automatic, structural, and tells you what RTL was
+  *touched*.
+- **Functional coverage** is hand-written, scenario-based, and tells you
+  what was *meaningfully tested* against the verification plan.
+- 100% on either metric alone does not mean the design is correct — code
+  coverage has no concept of "interesting," and functional coverage is
+  bounded by the completeness of the plan that generated it.
+- Real projects require both, tracked together, to call verification
+  complete.

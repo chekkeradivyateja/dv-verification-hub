@@ -1,0 +1,121 @@
+---
+title: "SystemVerilog Covergroup Syntax Explained (With Example)"
+description: "How coverpoints, bins, cross coverage, and sampling actually work in a SystemVerilog covergroup, with a realistic example from a bus transaction."
+topic: "coverage"
+date: "2026-01-12"
+keywords: ["systemverilog covergroup syntax", "covergroup example", "coverpoint bins cross"]
+---
+
+Functional coverage is how you answer "did my random stimulus actually hit the
+scenarios I care about?" The mechanism for that in SystemVerilog is the
+`covergroup` construct, and its syntax has a few sharp corners that are worth
+knowing cold.
+
+## Anatomy of a covergroup
+
+```systemverilog
+class axi_item extends uvm_sequence_item;
+  rand bit [31:0] addr;
+  rand bit [2:0]  size;
+  rand bit        write;
+  bit [1:0]       resp;
+  // ... fields, constructor, utils macros omitted for brevity
+endclass
+
+class axi_coverage extends uvm_subscriber #(axi_item);
+  `uvm_component_utils(axi_coverage)
+
+  axi_item txn;
+
+  covergroup cg;
+    option.per_instance = 1;
+
+    cp_write: coverpoint txn.write;
+
+    cp_size: coverpoint txn.size {
+      bins byte_xfer = {0};
+      bins hword_xfer = {1};
+      bins word_xfer = {2};
+      bins illegal_size = default;
+    }
+
+    cp_addr_range: coverpoint txn.addr {
+      bins low   = {[32'h0000_0000 : 32'h0000_0FFF]};
+      bins mid   = {[32'h0000_1000 : 32'h0000_FFFF]};
+      bins high  = {[32'h0001_0000 : $]};
+    }
+
+    cp_resp: coverpoint txn.resp {
+      bins okay   = {2'b00};
+      bins error  = {2'b10, 2'b11};
+    }
+
+    cx_write_size: cross cp_write, cp_size;
+  endgroup
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+    cg = new();
+  endfunction
+
+  function void write(axi_item t);
+    txn = t;
+    cg.sample();
+  endfunction
+endclass
+```
+
+## The parts that matter
+
+**`coverpoint`** tracks the values a single variable takes. If you don't
+define `bins` explicitly, SystemVerilog auto-bins every possible value, which
+is fine for a 3-bit `size` field and a terrible idea for a 32-bit address —
+that's why `cp_addr_range` uses explicit range bins instead of letting the
+tool try to create 2^32 bins.
+
+**`bins name = {values}`** groups specific values (or ranges, using `[a:b]`)
+into one named bin. `default` catches anything not matched by the other bins
+— useful for confirming you never see an illegal encoding (`cp_size` above).
+
+**`cross`** tracks combinations of two or more coverpoints. `cx_write_size`
+above tells you not just "did I see every size" and "did I see both write and
+read" independently, but specifically whether you've exercised
+*write+byte, write+hword, write+word, read+byte, ...* as distinct combinations
+— this is usually where the real coverage holes are (e.g., you constrained
+randomization such that reads are never byte-sized).
+
+**`option.per_instance = 1`** matters the moment you have more than one
+instance of this coverage collector (e.g., one per agent in a multi-master
+environment). Without it, the simulator merges coverage across all instances
+into one shared cumulative model, which usually isn't what you want when
+you're trying to see per-master results.
+
+## Sampling
+
+A covergroup only records a sample when `.sample()` is called — either
+explicitly (as above, from `write()` when a transaction is observed) or
+automatically if you declare `coverpoint`s with an `@(posedge clk)` clocking
+event on the covergroup itself:
+
+```systemverilog
+covergroup cg @(posedge vif.clk);
+  ...
+endgroup
+```
+
+Explicit `.sample()` calls (typically from a coverage collector subscribed to
+the monitor's analysis port, as shown above) are more common in UVM
+environments because they let you sample exactly once per completed
+transaction, not once per clock edge.
+
+## Interview-ready summary
+
+- A `coverpoint` measures the values one signal/field takes; `bins` control
+  how those values are grouped.
+- `cross` measures *combinations* of coverpoints — that's usually where
+  meaningful coverage holes hide.
+- `option.per_instance` controls whether multiple instances of the same
+  covergroup report separately or get merged.
+- Sample explicitly via `.sample()` from your coverage collector (subscribed
+  to the monitor) rather than relying on a global clock — it keeps one sample
+  per transaction instead of per cycle.

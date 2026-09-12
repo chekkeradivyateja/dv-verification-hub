@@ -1,0 +1,131 @@
+---
+title: "UVM Sequence vs Sequence Item: Difference and Example"
+description: "A clear breakdown of how uvm_sequence and uvm_sequence_item differ, with working code showing how they interact through a sequencer."
+topic: "uvm"
+date: "2026-01-10"
+keywords: ["uvm sequence vs sequence item", "uvm_sequence_item example", "uvm sequence example"]
+---
+
+This distinction trips up almost everyone early in UVM, and it's a near-guaranteed
+interview question because it tests whether you actually understand the
+generator/driver split, not just whether you can copy-paste a testbench.
+
+## The one-sentence difference
+
+A **`uvm_sequence_item`** is the transaction &mdash; the data (address, data,
+control bits) that eventually gets driven onto the DUT interface. A
+**`uvm_sequence`** is the *code that generates a stream of those items* and
+sends them to a sequencer, one at a time, waiting for each to be driven before
+deciding what to send next.
+
+If you think in OOP terms: the sequence item is a **data object**, the
+sequence is a **stimulus-generation procedure**. One drives you nowhere by
+itself; the other has nothing to drive without it.
+
+## The sequence item
+
+```systemverilog
+class axi_write_item extends uvm_sequence_item;
+  rand bit [31:0] addr;
+  rand bit [31:0] data;
+  rand bit [2:0]  size;
+
+  `uvm_object_utils_begin(axi_write_item)
+    `uvm_field_int(addr, UVM_ALL_ON)
+    `uvm_field_int(data, UVM_ALL_ON)
+    `uvm_field_int(size, UVM_ALL_ON)
+  `uvm_object_utils_end
+
+  function new(string name = "axi_write_item");
+    super.new(name);
+  endfunction
+
+  constraint c_size { size inside {[0:2]}; }
+endclass
+```
+
+Notice it extends `uvm_sequence_item`, not `uvm_transaction` directly (that's
+the grandparent class) &mdash; and it's randomizable, because generating stimulus
+is usually the point.
+
+## The sequence
+
+```systemverilog
+class axi_write_seq extends uvm_sequence #(axi_write_item);
+  `uvm_object_utils(axi_write_seq)
+
+  function new(string name = "axi_write_seq");
+    super.new(name);
+  endfunction
+
+  task body();
+    repeat (10) begin
+      axi_write_item item = axi_write_item::type_id::create("item");
+      start_item(item);
+      if (!item.randomize())
+        `uvm_error(get_type_name(), "Randomization failed")
+      finish_item(item);
+    end
+  endtask
+endclass
+```
+
+`uvm_sequence #(REQ)` is parameterized on the item type it produces &mdash; that
+type parameter is exactly how the sequence and sequencer agree on what's being
+passed between them.
+
+## How they connect: start_item / finish_item
+
+`start_item()` and `finish_item()` are the handshake between the sequence and
+the sequencer:
+
+1. `start_item(item)` requests access to the sequencer (arbitrates against
+   other sequences if more than one is running) and blocks until granted.
+2. Between `start_item` and `finish_item` you typically call `item.randomize()`
+   — this is your last chance to fill in the transaction before it's visible
+   to the driver.
+3. `finish_item(item)` hands the item to the driver via `get_next_item()` /
+   `item_done()` on the driver side, and blocks until the driver signals it's
+   done consuming the item.
+
+## Running the sequence
+
+A sequence doesn't do anything until it's started on a sequencer, usually from
+a test:
+
+```systemverilog
+class axi_write_test extends uvm_test;
+  `uvm_component_utils(axi_write_test)
+  axi_env env;
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+  endfunction
+
+  function void build_phase(uvm_phase phase);
+    env = axi_env::type_id::create("env", this);
+  endfunction
+
+  task run_phase(uvm_phase phase);
+    axi_write_seq seq = axi_write_seq::type_id::create("seq");
+    phase.raise_objection(this);
+    seq.start(env.agent.sequencer);
+    phase.drop_objection(this);
+  endtask
+endclass
+```
+
+## Interview-ready summary
+
+| | `uvm_sequence_item` | `uvm_sequence` |
+|---|---|---|
+| Represents | A single transaction | A stream/procedure that generates transactions |
+| Base class | `uvm_sequence_item` | `uvm_sequence #(REQ, RSP)` |
+| Randomized? | Usually yes | No (it randomizes the items it creates) |
+| Runs on | Consumed by driver | Started on a sequencer |
+| Reusable across tests? | Yes, as data | Yes, as stimulus logic — this is where you build layered/virtual sequences |
+
+The reason UVM separates these two concerns is reuse: you can write many
+different sequences (directed, random, error-injection, corner-case) that all
+produce the *same* item type, and swap them into a test without touching the
+driver, monitor, or scoreboard at all.

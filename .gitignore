@@ -36,6 +36,10 @@ yarn-error.log*
 # vercel
 .vercel
 
+# generated at build time -- see scripts/generate-og.mjs
+/.og-fonts-cache/
+/public/og/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

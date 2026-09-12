@@ -1,0 +1,104 @@
+---
+title: "SystemVerilog SVA $rose, $fell, $stable Explained with Examples"
+description: "How the edge-detection system functions $rose, $fell, and $stable actually sample their arguments, with working assertions for a handshake and an enable signal."
+topic: "sva"
+date: "2026-01-28"
+keywords: ["sva rose fell stable", "$rose $fell systemverilog example", "systemverilog stable function"]
+---
+
+`$rose`, `$fell`, and `$stable` are the three edge-detection system functions
+you'll use in almost every SVA property that cares about *when* a signal
+changes, not just its current value. They look trivial and are frequently
+used slightly wrong.
+
+## What each one means
+
+| Function | True when |
+|---|---|
+| `$rose(sig)` | `sig`'s least-significant bit transitioned from 0 to 1 between the previous and current sampled clock edge |
+| `$fell(sig)` | `sig`'s least-significant bit transitioned from 1 to 0 |
+| `$stable(sig)` | `sig`'s value is unchanged from the previous sampled clock edge |
+| `$changed(sig)` | the inverse of `$stable` — value differs from the previous sample |
+
+The critical detail: **all four are evaluated against the sampled value at
+the previous clocking event**, not "at some point during the current cycle."
+That's why they only make sense inside a clocked (concurrent) assertion
+context — used outside one, "previous" isn't well defined.
+
+## `$rose` — detecting a request pulse
+
+```systemverilog
+property p_req_pulse_causes_grant;
+  @(posedge clk) disable iff (!rst_n)
+    $rose(req) |-> ##[1:3] gnt;
+endproperty
+
+a_req_pulse: assert property (p_req_pulse_causes_grant);
+```
+
+This fires the check specifically on the cycle `req` transitions low-to-high
+— not every cycle `req` happens to be high. That distinction matters if
+`req` can stay asserted for multiple cycles: without `$rose`, `req |-> ...`
+would re-trigger the check on every single cycle `req` is high, not just the
+first one.
+
+## `$fell` — checking cleanup after a transaction ends
+
+```systemverilog
+property p_busy_clears_fifo_ptr;
+  @(posedge clk) disable iff (!rst_n)
+    $fell(busy) |-> ##1 (fifo_wr_ptr == fifo_rd_ptr);
+endproperty
+```
+
+Same idea in reverse: check something specifically at the moment `busy`
+drops, not continuously while it's low.
+
+## `$stable` — asserting a value doesn't glitch mid-transfer
+
+```systemverilog
+property p_addr_stable_during_access;
+  @(posedge clk) disable iff (!rst_n)
+    (psel && !penable) |=> $stable(paddr) throughout (penable[->1]);
+endproperty
+```
+
+This says: once APB enters its setup phase, `paddr` must not change at all
+until `penable` is eventually seen high. `$stable` is the standard tool for
+"this value must hold steady across a multi-cycle window," which comes up
+constantly for address/control signals during a bus transfer.
+
+## A subtle gotcha: `$rose`/`$fell`/`$stable` on multi-bit signals
+
+By default, these functions operate on **bit [0]** of a vector unless you
+explicitly reduce it yourself:
+
+```systemverilog
+// WRONG (probably): only checks bit 0 of state, not the whole value
+$rose(state)
+
+// RIGHT: explicit comparison against previous value
+property p_state_left_idle;
+  @(posedge clk) disable iff (!rst_n)
+    ($past(state) == IDLE) && (state != IDLE) |-> some_consequent;
+endproperty
+```
+
+If you need edge detection on a full multi-bit value (like an FSM state
+enum), don't rely on `$rose`/`$fell` directly — use `$past()` to grab the
+previous sampled value and compare it explicitly, as shown above. This is a
+very common bug source: `$rose(state)` silently compiles and silently
+watches only `state[0]`.
+
+## Interview-ready summary
+
+- `$rose`, `$fell`, `$stable`, `$changed` all compare against the value
+  sampled at the *previous* clocking event — they only make sense inside a
+  clocked assertion.
+- `$rose`/`$fell` operate on **bit 0 only** for multi-bit signals; use
+  `$past()` with explicit comparison for full-value edge detection on
+  vectors/enums.
+- Use `$rose`/`$fell` to trigger a check on a specific transition instead of
+  re-triggering every cycle a level-sensitive condition holds.
+- `$stable(...) throughout (...)` is the standard idiom for "this value must
+  not glitch during a multi-cycle window."

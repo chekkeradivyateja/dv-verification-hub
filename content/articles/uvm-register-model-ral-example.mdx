@@ -1,0 +1,148 @@
+---
+title: "UVM Register Abstraction Layer (RAL) Example"
+description: "How uvm_reg, uvm_reg_field, uvm_reg_block, and adapters fit together, with a working front-door register read/write example."
+topic: "uvm"
+date: "2026-01-30"
+keywords: ["uvm register model example", "uvm ral example", "uvm_reg_block adapter"]
+---
+
+The UVM Register Abstraction Layer (RAL) exists so you can write
+`reg_model.ctrl_reg.write(status, 32'h1)` instead of manually building a bus
+transaction, driving it through a sequence, and manually tracking what value
+every register is supposed to currently hold. It's one of the more
+mechanical-feeling parts of UVM, but the pieces fit together in a specific,
+learnable way.
+
+## The four building blocks
+
+```systemverilog
+class ctrl_reg extends uvm_reg;
+  `uvm_object_utils(ctrl_reg)
+
+  rand uvm_reg_field enable;
+  rand uvm_reg_field mode;
+
+  function new(string name = "ctrl_reg");
+    super.new(name, 32, UVM_NO_COVERAGE);
+  endfunction
+
+  function void build();
+    enable = uvm_reg_field::type_id::create("enable");
+    enable.configure(this, 1, 0, "RW", 0, 1'b0, 1, 1, 0);
+
+    mode = uvm_reg_field::type_id::create("mode");
+    mode.configure(this, 2, 1, "RW", 0, 2'b00, 1, 1, 0);
+  endfunction
+endclass
+
+class my_reg_block extends uvm_reg_block;
+  `uvm_object_utils(my_reg_block)
+
+  rand ctrl_reg ctrl;
+
+  function new(string name = "my_reg_block");
+    super.new(name, UVM_NO_COVERAGE);
+  endfunction
+
+  function void build();
+    default_map = create_map("default_map", 0, 4, UVM_LITTLE_ENDIAN);
+    ctrl = ctrl_reg::type_id::create("ctrl");
+    ctrl.configure(this, null, "");
+    ctrl.build();
+    default_map.add_reg(ctrl, 'h00, "RW");
+  endfunction
+endclass
+```
+
+`uvm_reg_field.configure(parent, size, lsb_pos, access, ...)` — the `1` and
+`0` after the reset value (`1'b0`) mean "is volatile" and "has reset,"
+respectively; getting the field width/position wrong here is the single most
+common RAL bug, because nothing catches it until you try a bus operation and
+get the wrong bits.
+
+## The adapter: translating RAL to your bus protocol
+
+RAL doesn't know anything about your bus protocol. A `uvm_reg_adapter`
+translates a generic `uvm_reg_bus_op` into your actual sequence item type and
+back:
+
+```systemverilog
+class apb_reg_adapter extends uvm_reg_adapter;
+  `uvm_object_utils(apb_reg_adapter)
+
+  function uvm_sequence_item reg2bus(const ref uvm_reg_bus_op rw);
+    apb_item item = apb_item::type_id::create("item");
+    item.paddr  = rw.addr;
+    item.pwdata = rw.data;
+    item.pwrite = (rw.kind == UVM_WRITE);
+    return item;
+  endfunction
+
+  function void bus2reg(uvm_sequence_item bus_item, ref uvm_reg_bus_op rw);
+    apb_item item;
+    if (!$cast(item, bus_item))
+      `uvm_fatal("ADAPTER", "Failed to cast bus_item to apb_item")
+    rw.addr   = item.paddr;
+    rw.data   = item.prdata;
+    rw.kind   = item.pwrite ? UVM_WRITE : UVM_READ;
+    rw.status = item.pslverr ? UVM_NOT_OK : UVM_IS_OK;
+  endfunction
+endclass
+```
+
+This is the piece that makes RAL protocol-agnostic: swap the adapter and the
+same register model works over APB, AXI, or any other bus, without touching
+`ctrl_reg` at all.
+
+## Wiring it together
+
+```systemverilog
+function void connect_phase(uvm_phase phase);
+  reg_model.default_map.set_sequencer(env.apb_agent.sequencer, adapter);
+  reg_model.default_map.set_auto_predict(1); // or use an explicit predictor
+endfunction
+```
+
+`set_auto_predict(1)` tells RAL to update its internal mirror of register
+values automatically after every access, based on what was sent/received —
+convenient for simple cases, though many projects instead wire up an
+explicit `uvm_reg_predictor` fed from the bus monitor, so the mirror updates
+even for register accesses RAL didn't initiate itself (e.g., a backdoor
+write, or traffic from another master).
+
+## Using it from a test
+
+```systemverilog
+task body();
+  uvm_status_e status;
+  uvm_reg_data_t rdata;
+
+  // front-door write: goes through the real bus, through the adapter,
+  // through the actual APB sequencer/driver
+  reg_model.ctrl.write(status, 32'h00000003, UVM_FRONTDOOR);
+
+  reg_model.ctrl.read(rdata, status, UVM_FRONTDOOR);
+
+  if (reg_model.ctrl.get_mirrored_value() != rdata)
+    `uvm_error("RAL", "Mirror mismatch after read")
+endtask
+```
+
+`UVM_FRONTDOOR` drives the access through the real bus (via the adapter and
+sequencer) — this is what you want for normal register testing, since it
+actually exercises the DUT's bus interface. `UVM_BACKDOOR` (via
+`add_hdl_path()` bound to the RTL signal) writes directly into the RTL
+register with zero bus cycles, which is useful for fast test setup but
+verifies nothing about the bus-facing register logic itself.
+
+## Interview-ready summary
+
+- `uvm_reg_field` → `uvm_reg` → `uvm_reg_block` mirrors your register map's
+  actual structure (fields inside registers inside a block/map).
+- `uvm_reg_adapter` is what makes RAL protocol-agnostic — it translates
+  between the generic `uvm_reg_bus_op` and your real sequence item type.
+- `UVM_FRONTDOOR` exercises the real bus; `UVM_BACKDOOR` writes RTL directly
+  and skips bus verification entirely — know which one a given test actually
+  needs.
+- `set_auto_predict` (or an explicit `uvm_reg_predictor`) keeps RAL's
+  internal mirror in sync with what the DUT's registers actually hold.

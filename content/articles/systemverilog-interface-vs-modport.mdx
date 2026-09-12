@@ -1,0 +1,132 @@
+---
+title: "SystemVerilog Interface vs Modport: What's the Difference?"
+description: "Interfaces bundle signals; modports restrict direction and visibility per connected module. A worked example showing why testbenches break without modports."
+topic: "sv-basics"
+date: "2026-01-06"
+keywords: ["systemverilog interface vs modport", "modport example", "systemverilog interface direction"]
+---
+
+An `interface` and a `modport` solve two different problems that get taught
+together so often people assume they're the same feature. They're not.
+
+## The interface: bundling signals
+
+Before interfaces, connecting a DUT to a testbench meant declaring every
+signal individually and wiring them one at a time in every module port list.
+An `interface` bundles related signals into a single object you can pass
+around as one handle:
+
+```systemverilog
+interface axi_lite_if (input logic clk, input logic rst_n);
+  logic [31:0] awaddr;
+  logic        awvalid;
+  logic        awready;
+  logic [31:0] wdata;
+  logic        wvalid;
+  logic        wready;
+  logic [1:0]  bresp;
+  logic        bvalid;
+  logic        bready;
+endinterface
+```
+
+Now a module connects to the whole bus with one port instead of nine:
+
+```systemverilog
+module dut (axi_lite_if.slave bus);
+  // ...
+endmodule
+```
+
+That `.slave` after `axi_lite_if` is a **modport** — and it's doing something
+an interface alone cannot.
+
+## The problem a bare interface doesn't solve
+
+If you connect a raw interface with no modport, *every* module that gets a
+handle to it can read and drive *every* signal, in *any* direction. Nothing
+stops your driver from accidentally writing to `awready` (which the DUT is
+supposed to drive) or your DUT model from driving `awaddr` (which the driver
+owns). This is exactly the kind of bug that only shows up as X-propagation or
+contention warnings deep in simulation, far from its actual cause.
+
+## The modport: restricting direction per connection
+
+A `modport` declares, for one particular "role" using the interface, which
+signals are inputs and which are outputs *from that role's point of view*:
+
+```systemverilog
+interface axi_lite_if (input logic clk, input logic rst_n);
+  logic [31:0] awaddr;
+  logic        awvalid;
+  logic        awready;
+  logic [31:0] wdata;
+  logic        wvalid;
+  logic        wready;
+  logic [1:0]  bresp;
+  logic        bvalid;
+  logic        bready;
+
+  modport master (
+    output awaddr, awvalid, wdata, wvalid, bready,
+    input  awready, wready, bresp, bvalid,
+    input  clk, rst_n
+  );
+
+  modport slave (
+    input  awaddr, awvalid, wdata, wvalid, bready,
+    output awready, wready, bresp, bvalid,
+    input  clk, rst_n
+  );
+endinterface
+```
+
+Now the connections are direction-checked at compile time:
+
+```systemverilog
+module dut (axi_lite_if.slave bus);
+  // bus.awready is an output here -- driving bus.awaddr would be a compile error
+endmodule
+
+class axi_driver extends uvm_driver #(axi_item);
+  virtual axi_lite_if.master vif;
+  // vif.awaddr is an output here -- reading it back "as driven" is fine,
+  // but the compiler stops you from accidentally trying to drive bus.awready
+endclass
+```
+
+That compile-time direction check is the entire value proposition of a
+modport: it turns a class of runtime bugs (driving a signal you don't own)
+into a compile error, months before simulation.
+
+## Virtual interfaces in the testbench
+
+In a UVM environment, the interface instance lives in the top-level testbench
+module, and components get a **virtual interface** handle to it (typically
+passed through `uvm_config_db`), often with the modport baked into the type:
+
+```systemverilog
+virtual axi_lite_if.master vif;
+
+function void build_phase(uvm_phase phase);
+  if (!uvm_config_db#(virtual axi_lite_if.master)::get(this, "", "vif", vif))
+    `uvm_fatal("NOVIF", "Virtual interface not set")
+endfunction
+```
+
+Using `virtual axi_lite_if.master` instead of the bare `virtual axi_lite_if`
+means this driver class literally cannot compile if someone accidentally
+wires it to the slave side.
+
+## Interview-ready summary
+
+- An **interface** bundles a group of related signals into one reusable,
+  passable type.
+- A **modport** defines direction (`input`/`output`) for a specific role
+  connecting to that interface — it does not add new signals, it restricts
+  how existing ones may be used from one connection point.
+- Skipping modports means direction bugs only surface as simulation-time
+  X-propagation or drive contention; using them turns the same bugs into
+  compile-time errors.
+- In UVM, prefer typing virtual interface handles with their modport
+  (`virtual my_if.master`) rather than the bare interface type.

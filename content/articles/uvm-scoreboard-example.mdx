@@ -1,0 +1,160 @@
+---
+title: "UVM Scoreboard Example: Complete Code Walkthrough"
+description: "A working UVM scoreboard example showing analysis exports, a reference model, and a queue-based comparison, with the design decisions explained."
+topic: "uvm"
+date: "2026-01-14"
+keywords: ["uvm scoreboard example", "uvm_analysis_imp scoreboard", "uvm scoreboard code"]
+---
+
+A scoreboard's job is simple to describe and easy to get subtly wrong to
+implement: **compare what the DUT actually did against what it should have
+done.** Here's a complete, working pattern.
+
+## The interfaces in and out
+
+A scoreboard typically receives two independent streams: one from a monitor
+watching the DUT's input side (or a reference model fed by it), and one from a
+monitor watching the DUT's output side.
+
+```systemverilog
+class scoreboard extends uvm_component;
+  `uvm_component_utils(scoreboard)
+
+  uvm_analysis_imp #(axi_item, scoreboard) exp_export;
+  uvm_analysis_imp_actual #(axi_item, scoreboard) act_export;
+
+  axi_item exp_q[$];
+
+  int unsigned match_count;
+  int unsigned mismatch_count;
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+  endfunction
+endclass
+```
+
+Two separate `uvm_analysis_imp` ports (macro-generated with different suffixes
+via `` `uvm_analysis_imp_decl(_actual) `` — see below) let the scoreboard
+implement two distinctly-named `write()` methods, since a class can't have two
+methods with the same signature otherwise.
+
+```systemverilog
+`uvm_analysis_imp_decl(_actual)
+
+class scoreboard extends uvm_component;
+  `uvm_component_utils(scoreboard)
+
+  uvm_analysis_imp #(axi_item, scoreboard)        exp_export;
+  uvm_analysis_imp_actual #(axi_item, scoreboard) act_export;
+
+  axi_item exp_q[$];
+  int unsigned match_count, mismatch_count;
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+  endfunction
+
+  function void build_phase(uvm_phase phase);
+    exp_export = new("exp_export", this);
+    act_export = new("act_export", this);
+  endfunction
+
+  // called when the reference-model / expected side publishes a transaction
+  function void write(axi_item t);
+    exp_q.push_back(t);
+  endfunction
+
+  // called when the DUT-output monitor publishes an actual transaction
+  function void write_actual(axi_item actual);
+    axi_item expected;
+
+    if (exp_q.size() == 0) begin
+      `uvm_error(get_type_name(),
+        $sformatf("Unexpected actual transaction with no pending expected: %s",
+                   actual.sprint()))
+      mismatch_count++;
+      return;
+    end
+
+    expected = exp_q.pop_front();
+
+    if (!expected.compare(actual)) begin
+      `uvm_error(get_type_name(),
+        $sformatf("MISMATCH\n  expected: %s\n  actual  : %s",
+                   expected.sprint(), actual.sprint()))
+      mismatch_count++;
+    end else begin
+      `uvm_info(get_type_name(), "Match", UVM_HIGH)
+      match_count++;
+    end
+  endfunction
+
+  function void report_phase(uvm_phase phase);
+    `uvm_info(get_type_name(),
+      $sformatf("Scoreboard: %0d match, %0d mismatch", match_count, mismatch_count),
+      UVM_LOW)
+  endfunction
+endclass
+```
+
+## Why a queue, not a single variable
+
+`exp_q` is a queue, not a single expected-transaction variable, because
+expected and actual transactions rarely arrive in lockstep — the reference
+model may compute the expected result before the DUT has even finished
+processing (pipelining, latency), so you need to buffer expected transactions
+until their matching actual transaction shows up. This also means an
+unexpectedly empty queue on `write_actual()` is itself a bug signal (DUT
+produced a transaction nobody predicted), which is why it's handled as an
+error above rather than silently ignored.
+
+## Wiring it up in the environment
+
+```systemverilog
+class axi_env extends uvm_env;
+  `uvm_component_utils(axi_env)
+
+  axi_agent   agent;
+  ref_model   model;
+  scoreboard  sb;
+
+  function void build_phase(uvm_phase phase);
+    agent = axi_agent::type_id::create("agent", this);
+    model = ref_model::type_id::create("model", this);
+    sb    = scoreboard::type_id::create("sb", this);
+  endfunction
+
+  function void connect_phase(uvm_phase phase);
+    agent.monitor.item_collected_port.connect(model.item_export);
+    model.result_port.connect(sb.exp_export);
+    agent.monitor.item_collected_port.connect(sb.act_export);
+  endfunction
+endclass
+```
+
+Note that the DUT-input monitor's `item_collected_port` fans out to *both* the
+reference model and (in some topologies) the scoreboard, depending on whether
+the scoreboard needs raw input transactions directly or only the model's
+predictions.
+
+## Comparing with `.compare()`, not `==`
+
+`expected.compare(actual)` uses the field automation macros
+(`` `uvm_field_int ``, etc.) declared in the transaction class to do a
+field-by-field comparison and can be selectively overridden per-field (e.g.,
+excluding a timestamp field from comparison). Plain `==` on class handles
+compares references, not contents — a very common bug for people new to
+UVM.
+
+## Interview-ready summary
+
+- Scoreboards compare **expected vs actual**, usually via two separate
+  analysis imps declared with `` `uvm_analysis_imp_decl `` so `write()` can
+  be overloaded by name.
+- Buffer expected transactions in a **queue**, because timing between
+  expected and actual streams is rarely 1:1 in real time.
+- Use `.compare()` (from field automation macros), never `==`, to compare
+  transaction objects.
+- An empty expected queue when an actual transaction arrives is a bug
+  signal, not a no-op — always flag it.

@@ -1,0 +1,116 @@
+---
+title: "How to Write an SVA Assertion: Step-by-Step Guide"
+description: "A practical, step-by-step walkthrough for writing your first SystemVerilog Assertion, from sequence to property to assert, with a working handshake example."
+topic: "sva"
+date: "2026-01-08"
+keywords: ["how to write an sva assertion", "systemverilog assertion tutorial", "sva property example"]
+---
+
+Most SVA tutorials show you a finished assertion and expect you to reverse
+engineer the syntax. Here's the process in the order you should actually think
+about it: define the temporal behavior first, then wrap it.
+
+## Step 1: state the rule in plain English
+
+Before writing any SVA, write the rule as a sentence. For example:
+
+> "Whenever `req` is asserted, `ack` must go high within 4 clock cycles, and
+> `req` must stay high until `ack` arrives."
+
+If you can't state it this precisely, you're not ready to write the
+assertion — and you'll write a wrong one that "looks right."
+
+## Step 2: build the sequence
+
+A `sequence` describes *when* something happens over time, using `##N` for
+cycle delays:
+
+```systemverilog
+sequence s_req_stable;
+  req throughout (##[1:4] ack);
+endsequence
+```
+
+`throughout` means "the left-hand expression (`req`) must hold true for every
+cycle of the right-hand sequence" — exactly our "`req` must stay high until
+`ack` arrives" requirement. `##[1:4]` means "ack must arrive somewhere between
+1 and 4 cycles later."
+
+## Step 3: wrap it in a property with an implication
+
+A `property` adds the *trigger condition* — when should this sequence even be
+checked? Use `|->` (overlapping implication) or `|=>` (non-overlapping,
+one-cycle-later implication):
+
+```systemverilog
+property p_req_ack;
+  @(posedge clk) disable iff (!rst_n)
+    req |-> s_req_stable;
+endproperty
+```
+
+`req |-> s_req_stable` reads as: "whenever `req` is sampled true this cycle,
+the sequence `s_req_stable` must hold starting this same cycle."
+`disable iff (!rst_n)` is not optional in practice — without it, this
+assertion will fire spuriously every time your DUT is in reset.
+
+## Step 4: turn it into a checker with assert
+
+A `property` on its own does nothing — it's a template. `assert property`
+actually evaluates it and reports failures:
+
+```systemverilog
+a_req_ack: assert property (p_req_ack)
+  else `uvm_error("SVA", $sformatf("req asserted at time %0t without ack within 4 cycles", $time));
+```
+
+Give it a label (`a_req_ack:`) — unlabeled assertions are painful to find in
+waveform viewers and regression logs when they fire.
+
+## Full example, assembled
+
+```systemverilog
+module req_ack_checker (
+  input logic clk,
+  input logic rst_n,
+  input logic req,
+  input logic ack
+);
+
+  sequence s_req_stable;
+    req throughout (##[1:4] ack);
+  endsequence
+
+  property p_req_ack;
+    @(posedge clk) disable iff (!rst_n)
+      req |-> s_req_stable;
+  endproperty
+
+  a_req_ack: assert property (p_req_ack)
+    else $error("req asserted without ack within 4 cycles at time %0t", $time);
+
+endmodule
+```
+
+## Common mistakes to avoid
+
+- **Forgetting `disable iff`** — every assertion tied to a clock should
+  usually be disabled during reset, or it fires on X/uninitialized values.
+- **Using `|->` when you mean `|=>`** — overlapping implication checks the
+  consequent starting the *same* cycle as the antecedent; if your rule is "on
+  the cycle *after* X, Y must happen," you want `|=>`, not a manual `##1`
+  tacked onto `|->` (both work, but mixing them up is a classic bug).
+- **No label** — always label properties and assertions; it's the first
+  thing you'll want in a regression failure report.
+- **Checking combinational logic with `##` delays** — if there's no clock
+  relationship, you likely want an immediate assertion (`assert
+  (cond) else ...;` inside an `always_comb` or procedural block) instead of a
+  concurrent, clocked one.
+
+## Interview-ready summary
+
+The pipeline is always: **sequence** (temporal pattern) → **property**
+(trigger + sequence, with `disable iff`) → **assert property** (label +
+failure action). If you can narrate that pipeline out loud while writing the
+code, you'll pass most SVA interview questions, because most of them are
+really testing whether you understand *why* the syntax is layered this way.

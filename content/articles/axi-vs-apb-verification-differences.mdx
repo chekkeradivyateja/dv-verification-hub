@@ -1,0 +1,113 @@
+---
+title: "AXI vs APB Verification: Key Differences Explained"
+description: "How verifying AMBA AXI differs from verifying APB in practice: handshaking, outstanding transactions, coverage models, and what changes in your UVM environment."
+topic: "protocols"
+date: "2026-01-16"
+keywords: ["axi vs apb verification", "axi verification differences", "apb verification environment"]
+---
+
+Both are AMBA bus protocols, both show up constantly in DV interviews, and
+they're verified very differently because they solve different problems. APB
+is a low-complexity peripheral bus; AXI is a high-throughput, pipelined,
+outstanding-transaction protocol. That difference in the DUT drives every
+difference in the testbench.
+
+## Handshake model
+
+**APB** is a simple two-phase protocol: `PSEL`/`PENABLE` on the setup and
+access phases, single transfer at a time, no pipelining.
+
+```
+SETUP:  PSEL=1, PENABLE=0
+ACCESS: PSEL=1, PENABLE=1, PREADY sampled
+```
+
+**AXI** uses independent `VALID`/`READY` handshakes on five separate
+channels (AW, W, B, AR, R), each of which can stall independently, and
+transactions on different channels are **not required to be ordered against
+each other** except by ID.
+
+```
+AW: AWVALID/AWREADY   (write address)
+W:  WVALID/WREADY     (write data, can arrive before or with AW)
+B:  BVALID/BREADY     (write response)
+AR: ARVALID/ARREADY   (read address)
+R:  RVALID/RREADY     (read data)
+```
+
+This single fact — five decoupled channels instead of one synchronous
+handshake — is the reason AXI testbenches are structurally more complex than
+APB ones.
+
+## What changes in the UVM environment
+
+| | APB | AXI |
+|---|---|---|
+| Driver complexity | One task drives one transfer at a time | Five channels can be driven independently/concurrently — often modeled as separate "channel" processes inside one driver |
+| Outstanding transactions | None — bus is strictly one transaction at a time | Multiple in flight, tracked by `ID`; the environment must handle out-of-order completion |
+| Sequencer/driver split | Single sequence item per transfer is enough | Often split into separate AW/W/B and AR/R sequence items, or one item with channel-aware driving logic |
+| Scoreboard matching | FIFO order matching (in = out order) | Must match by transaction ID, not arrival order, since responses can reorder |
+| Key coverage | Read/write, address ranges, `PSLVERR` | ID reuse/interleaving, outstanding depth reached, narrow/unaligned transfers, all `RRESP`/`BRESP` values, exclusive access sequences |
+
+## Ordering rules you have to actually check
+
+AXI's ordering rules are one of the most interview-relevant details:
+
+- Transactions with the **same ID** must complete in the order they were
+  issued.
+- Transactions with **different IDs** may complete in *any* order.
+- Write data (`W` channel) must be sent in the same order as its
+  corresponding `AW` address, but the `B` response can still be delayed
+  independently.
+
+A scoreboard that assumes strict FIFO ordering (fine for APB) will produce
+false failures the moment an AXI DUT legally reorders two different-ID
+transactions. This is usually implemented as a scoreboard indexed by
+`{ID}` with per-ID ordered queues, rather than one global queue.
+
+## Example: minimal AXI write-address sequence item vs APB item
+
+```systemverilog
+// APB - one item is one complete transfer
+class apb_item extends uvm_sequence_item;
+  rand bit [31:0] paddr;
+  rand bit [31:0] pwdata;
+  rand bit        pwrite;
+       bit [31:0] prdata;
+       bit        pslverr;
+endclass
+
+// AXI - address and data are separate concerns, tracked by id
+class axi_aw_item extends uvm_sequence_item;
+  rand bit [3:0]  awid;
+  rand bit [31:0] awaddr;
+  rand bit [7:0]  awlen;    // burst length - 1
+  rand bit [2:0]  awsize;
+  rand bit [1:0]  awburst;
+endclass
+
+class axi_w_item extends uvm_sequence_item;
+  rand bit [3:0]  wid;      // only present pre-AXI4; kept here for clarity
+  rand bit [31:0] wdata;
+  rand bit [3:0]  wstrb;
+       bit        wlast;
+endclass
+```
+
+Notice APB doesn't need burst fields at all — there's no burst concept in
+APB — while AXI needs `AWLEN`/`AWSIZE`/`AWBURST` just to describe a single
+address-phase transaction, because one AXI transaction can move many beats of
+data.
+
+## Interview-ready summary
+
+- APB verification is dominated by simple directed + constrained-random
+  single-transfer testing; the hard part is usually just `PSLVERR` and
+  address decode coverage.
+- AXI verification is dominated by **concurrency and ordering**: independent
+  channel handshakes, outstanding transaction tracking by ID, burst
+  boundary/wrap behavior, and out-of-order completion — the scoreboard and
+  coverage model both have to be ID-aware, not just FIFO-based.
+- If asked "what's harder to verify, AXI or APB, and why" — the answer isn't
+  "AXI has more signals," it's **"AXI has weaker ordering guarantees, which
+  pushes complexity into the scoreboard and coverage model."**

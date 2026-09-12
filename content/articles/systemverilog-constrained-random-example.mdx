@@ -1,0 +1,131 @@
+---
+title: "SystemVerilog Constrained Random Verification Example"
+description: "How rand/randc, constraint blocks, and randomize() with inline overrides work together, plus the solver-failure debugging pattern every DV engineer needs."
+topic: "sv-basics"
+date: "2026-01-04"
+keywords: ["systemverilog constrained random example", "randomize with constraints", "randc vs rand"]
+---
+
+Constrained random verification is the core idea that makes SystemVerilog
+different from plain Verilog testbenches: instead of hand-writing every test
+vector, you describe the *legal space* of inputs and let a constraint solver
+generate values inside it.
+
+## `rand` vs `randc`
+
+```systemverilog
+class bus_item;
+  rand  bit [7:0] addr;
+  randc bit [1:0] channel;
+endclass
+```
+
+`rand` produces a new pseudo-random value each call to `randomize()`, with
+repeats allowed. `randc` ("random-cyclic") guarantees every value in the
+variable's range is produced exactly once before any value repeats — useful
+for something like a 2-bit channel select where you want to guarantee equal
+coverage across all 4 channels before cycling back. `randc` is impractical
+for wide fields (the tool has to track a full permutation), which is exactly
+why it's typically reserved for small enums/small bit widths.
+
+## Constraint blocks
+
+```systemverilog
+class axi_item;
+  rand bit [31:0] addr;
+  rand bit [2:0]  size;
+  rand bit        write;
+
+  constraint c_size_valid {
+    size inside {0, 1, 2}; // byte, halfword, word
+  }
+
+  constraint c_addr_aligned {
+    (size == 0) -> (addr[0:0] == 0);
+    (size == 1) -> (addr[1:0] == 0);
+    (size == 2) -> (addr[2:0] == 0);
+  }
+
+  constraint c_write_dist {
+    write dist { 1 := 70, 0 := 30 }; // 70% writes, 30% reads
+  }
+endclass
+```
+
+Three different constraint idioms here matter individually:
+
+- `inside {...}` restricts a variable to a fixed set of legal values.
+- `->` (implication) makes one constraint conditional on another — this is
+  how you encode "if this transfer is a word, the address must be
+  word-aligned" without writing separate classes for each size.
+- `dist` biases the distribution of solutions without eliminating any legal
+  value — useful for "mostly writes, sometimes reads" instead of a flat 50/50
+  split.
+
+## Inline constraints with `randomize() with`
+
+You don't need a new constraint block for a one-off restriction inside a
+sequence:
+
+```systemverilog
+task body();
+  axi_item item = axi_item::type_id::create("item");
+  start_item(item);
+  if (!item.randomize() with { addr inside {[32'h1000:32'h1FFF]}; write == 1; })
+    `uvm_error(get_type_name(), "Randomization failed")
+  finish_item(item);
+endtask
+```
+
+`randomize() with {...}` adds a temporary constraint for just this call,
+combined with whatever's already declared in the class — it doesn't replace
+the class's own constraints, it narrows them further for this one call site.
+
+## Turning constraints off and on
+
+```systemverilog
+item.c_addr_aligned.constraint_mode(0); // disable alignment for this object
+if (!item.randomize())
+  `uvm_error(get_type_name(), "Randomization failed")
+item.c_addr_aligned.constraint_mode(1); // restore it
+```
+
+This is the standard way to generate a deliberately illegal/corner-case
+stimulus (e.g., an unaligned transfer, to test the DUT's error response)
+without maintaining a separate class just for that one negative test.
+
+## Debugging a randomization failure
+
+`randomize()` returns `0` when the constraints are unsatisfiable — usually
+because two constraints contradict each other. The fastest way to find which
+one is to disable candidates one at a time (or use your simulator's
+constraint-solver debug/profiling output, which most commercial tools
+provide) rather than guessing:
+
+```systemverilog
+if (!item.randomize()) begin
+  `uvm_error("RAND", "Randomization failed - check for conflicting constraints")
+  // e.g.: c_size_valid restricts size to {0,1,2}, but an inline
+  // `with { size == 3; }` at the call site makes the whole set unsatisfiable
+end
+```
+
+A classic real-world version of this bug: one constraint restricts `size
+inside {0,1,2}`, and an inline `randomize() with { size == 3; }` at a call
+site (typo, or copy-pasted from a different item class) makes the combined
+constraint set impossible to satisfy — and `randomize()` fails with no more
+detail than "0" unless you go looking.
+
+## Interview-ready summary
+
+- `rand`: repeatable random values. `randc`: random permutation, no repeats
+  until the full range is exhausted — only practical for small ranges.
+- Constraints compose: class-level `constraint` blocks plus a call-site
+  `randomize() with {...}` are combined (ANDed), not one replacing the other.
+- `dist` biases probability without removing legal values; `inside` and `->`
+  restrict/condition the legal value set itself.
+- `constraint_mode(0/1)` lets you disable specific constraints per-object,
+  which is the standard way to generate legal negative-test stimulus without
+  a second class.
+- `randomize()` returning 0 means the constraint set is unsatisfiable —
+  usually a contradiction between a class constraint and an inline one.

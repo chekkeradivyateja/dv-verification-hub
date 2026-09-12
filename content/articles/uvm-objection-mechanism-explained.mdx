@@ -1,0 +1,123 @@
+---
+title: "UVM Objection Mechanism: raise_objection vs drop_objection Explained"
+description: "Why UVM's run_phase needs objections to keep from ending instantly, how raise/drop counting works, and the most common objection bugs that cause hangs or premature test end."
+topic: "uvm"
+date: "2026-02-01"
+keywords: ["uvm objection mechanism", "raise_objection drop_objection", "uvm phase objection example"]
+---
+
+Without objections, `run_phase` would end the instant it starts — UVM has no
+other built-in way to know "the test is still doing something." The
+objection mechanism is a simple counter with outsized consequences for how
+your whole simulation behaves.
+
+## The basic mechanism
+
+```systemverilog
+task run_phase(uvm_phase phase);
+  phase.raise_objection(this);   // counter: 0 -> 1, phase stays "in progress"
+  seq.start(sequencer);          // takes simulation time
+  phase.drop_objection(this);    // counter: 1 -> 0
+endtask
+```
+
+Every `raise_objection()` call increments a shared counter for that phase;
+every `drop_objection()` decrements it. When the counter returns to zero
+**and stays there** (UVM waits a configurable drain time in case something
+else raises again immediately), the phase is allowed to end. Multiple
+components can raise/drop independently — the phase doesn't end until
+*every* outstanding objection has been dropped, not just one.
+
+## Why multiple components raising objections matters
+
+```systemverilog
+// in the test
+task run_phase(uvm_phase phase);
+  phase.raise_objection(this);
+  main_seq.start(env.sqr);
+  phase.drop_objection(this);
+endtask
+
+// in the scoreboard, independently
+task run_phase(uvm_phase phase);
+  phase.raise_objection(this);
+  wait (transaction_count >= expected_count);
+  phase.drop_objection(this);
+endtask
+```
+
+If only the test raised an objection, the phase could end the moment the
+main sequence finishes — even if the scoreboard is still waiting on
+in-flight transactions to actually arrive and be checked. Because the
+scoreboard raises its own objection, `run_phase` won't end until *both* the
+sequence has finished *and* the scoreboard has seen everything it expects.
+This pattern — every component that needs to guarantee it finishes its work
+raises its own objection — is the standard way UVM environments avoid
+truncating a test mid-check.
+
+## The most common bug: forgetting to drop
+
+```systemverilog
+task run_phase(uvm_phase phase);
+  phase.raise_objection(this);
+  seq.start(sequencer);
+  // forgot phase.drop_objection(this) here
+endtask
+```
+
+The counter never returns to zero, `run_phase` never ends, and the
+simulation hangs until a `+UVM_TIMEOUT` or simulator wall-clock limit kills
+it. This is the single most common objection-related bug, and it's why
+production code almost always uses a `fork`/`join` or `try/finally`-style
+structure (SystemVerilog doesn't have `finally`, so a common pattern is
+raising right before a blocking call and dropping immediately after it
+returns, keeping the raise/drop pair textually adjacent and easy to audit).
+
+## The second most common bug: raising and dropping in the wrong scope
+
+```systemverilog
+task run_phase(uvm_phase phase);
+  phase.raise_objection(this);
+  fork
+    seq1.start(sqr1);
+    seq2.start(sqr2);
+  join_none          // returns immediately, doesn't wait for either sequence
+  phase.drop_objection(this);  // dropped before seq1/seq2 actually finish!
+endtask
+```
+
+`join_none` returns as soon as the fork block launches, not when the forked
+processes complete — so this drops the objection almost immediately,
+potentially ending `run_phase` while `seq1`/`seq2` are still mid-flight. The
+fix is `join` (wait for both) or `join_any` (wait for at least one),
+depending on the intended semantics, or moving the objection raise/drop
+inside each individual forked branch if they should be tracked
+independently.
+
+## Drain time: why a test doesn't end the instant the count hits zero
+
+```systemverilog
+function void build_phase(uvm_phase phase);
+  uvm_config_db#(int)::set(this, "*", "drain_time", 100);
+endfunction
+```
+
+Objection drain time creates a small window after the count reaches zero
+before the phase is actually allowed to end — this exists specifically so
+that a component which is *about* to raise a new objection (e.g., a monitor
+that just saw an event that will trigger a follow-up sequence) gets a chance
+to do so before the phase closes underneath it. Without any drain time,
+tightly-coupled back-to-back objection handoffs between components can race.
+
+## Interview-ready summary
+
+- Objections are a shared, phase-scoped counter: `raise_objection`
+  increments, `drop_objection` decrements; the phase only ends once it's
+  back at zero (after drain time).
+- Any component whose completion the test depends on should raise its own
+  objection — don't rely solely on the top-level test/sequence's objection.
+- Forgetting to drop an objection hangs the simulation; dropping too early
+  (commonly caused by `join_none` instead of `join`) truncates the test
+  before work actually finishes.
+- Drain time exists to avoid races between "objection count hit zero" and
+  "another component is about to raise a new one."

@@ -1,0 +1,114 @@
+---
+title: "UVM Factory Pattern and Overrides Explained"
+description: "What the UVM factory actually does, why type_id::create() exists instead of `new()`, and how type and instance overrides let you swap behavior without editing existing code."
+topic: "uvm"
+date: "2026-01-18"
+keywords: ["uvm factory pattern", "uvm factory override example", "type_id create vs new"]
+---
+
+The UVM factory is the single biggest reason UVM environments are reusable
+across projects and test-specific without editing shared code. If you only
+remember one thing from this article: **the factory lets you change *what
+class gets constructed* from outside the class that requests it.**
+
+## Why not just call `new()`?
+
+```systemverilog
+// Without the factory
+my_driver drv = new("drv", this);
+
+// With the factory
+my_driver drv = my_driver::type_id::create("drv", this);
+```
+
+`new()` hardcodes the exact class being instantiated — there is no way for
+anything outside that line of code to change it. `type_id::create()` asks the
+factory, at runtime, "what class should I actually build when someone asks
+for a `my_driver`?" By default the answer is "a `my_driver`," but that
+default can be overridden — from a test, from the command line, or from
+configuration — without ever touching the component that called `create()`.
+
+## Registering with the factory
+
+Every `uvm_component` and `uvm_object` you want to be factory-constructible
+must register itself, which is what these macros do:
+
+```systemverilog
+class my_driver extends uvm_driver #(my_item);
+  `uvm_component_utils(my_driver)   // registers my_driver with the factory
+  ...
+endclass
+```
+
+Skip this macro and `type_id::create()` won't know the class exists —
+a very common source of "why isn't my override working" bugs.
+
+## Type override: swap a class everywhere
+
+```systemverilog
+class error_injection_test extends base_test;
+  `uvm_component_utils(error_injection_test)
+
+  function void build_phase(uvm_phase phase);
+    // any time code asks the factory to create a `my_driver`,
+    // give it an `error_injecting_driver` instead
+    my_driver::type_id::set_type_override(error_injecting_driver::get_type());
+    super.build_phase(phase);
+  endfunction
+endclass
+```
+
+`error_injecting_driver` must extend `my_driver` (or at least be
+polymorphically compatible with wherever the handle is used) — the factory
+substitutes implementation, it doesn't change the interface the rest of the
+environment relies on.
+
+## Instance override: swap just one instance
+
+Sometimes you only want the override for a specific hierarchical path, not
+every instance in the testbench:
+
+```systemverilog
+function void build_phase(uvm_phase phase);
+  // only override the driver inside env.agent2, leave env.agent1 alone
+  my_driver::type_id::set_inst_override(
+    error_injecting_driver::get_type(),
+    "env.agent2.driver"
+  );
+  super.build_phase(phase);
+endfunction
+```
+
+Instance overrides take priority over type overrides for a matching path,
+which lets you combine "override everything" with "except this one spot."
+
+## Command-line factory overrides
+
+The same thing can be done without recompiling, from the simulator command
+line — extremely common for one-off debug runs:
+
+```
++uvm_set_type_override=my_driver,error_injecting_driver
++uvm_set_inst_override=my_env.agent2.driver,my_driver,error_injecting_driver
+```
+
+## Why this matters for reuse
+
+Picture a scoreboard, agents, and environment built once for a project. A new
+test needs to inject protocol errors on one channel only. Without the
+factory, you'd either edit the shared driver (risking every other test) or
+duplicate the entire environment. With the factory, you write one new driver
+subclass and override it in — everything else in the environment is
+untouched and still passes its own regressions.
+
+## Interview-ready summary
+
+- The factory decouples **what gets requested** (`my_driver`) from **what
+  gets constructed** (possibly a subclass), resolved at runtime.
+- `type_id::create()` is the factory-aware replacement for `new()` — always
+  use it for anything you might ever want to override.
+- `` `uvm_component_utils ``/`` `uvm_object_utils `` registration is
+  required for a class to be visible to the factory at all.
+- **Type override** = replace a class globally; **instance override** =
+  replace it only at one hierarchical path; instance overrides win when both
+  match.

@@ -4,14 +4,22 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "prebuild": "node scripts/generate-og.mjs",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "generate-og": "node scripts/generate-og.mjs"
   },
   "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "@vercel/analytics": "^2.0.1",
+    "gray-matter": "^4.0.3",
     "next": "16.3.5",
+    "next-mdx-remote": "^6.0.0",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "reading-time": "^1.5.0",
+    "satori": "^0.33.4"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
