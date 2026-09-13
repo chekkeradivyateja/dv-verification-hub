@@ -28,7 +28,7 @@ export default function EmailSignupForm({ tag }: { tag?: string }) {
       method="post"
       target="popupwindow"
       onSubmit={handleSubmit}
-      className="flex flex-col sm:flex-row gap-2 w-full"
+      className="flex flex-col gap-2 w-full"
     >
       <label htmlFor="bd-email" className="sr-only">
         Email address
