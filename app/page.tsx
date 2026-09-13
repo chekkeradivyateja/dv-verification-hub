@@ -41,7 +41,7 @@ export default function Home() {
           Real code, real interview questions, and free interactive tools for
           the SV/UVM stack &mdash; built by someone who ships testbenches for a
           living. When you want the deeper, structured version, it&rsquo;s a
-          $35 bundle away.
+          $49 bundle away.
         </p>
         <div className="mt-8 flex flex-wrap gap-3">
           <Link
@@ -131,10 +131,11 @@ export default function Home() {
           <h2 className="text-2xl font-semibold text-foreground">Why this site exists</h2>
           <p className="mt-4 text-muted leading-relaxed">
             Most SV/UVM content online is either outdated vendor documentation
-            or interview-question lists with no real explanation. This is a
-            free reference built from actual verification work &mdash;
-            testbench structure, assertions, and coverage models that show up
-            in real projects and real interviews.
+            or interview-question lists with no real explanation. I&rsquo;ve
+            spent the last couple of years hands-on with AMBA protocol
+            verification (AXI/AHB/APB), DDR/memory controllers, and UVM
+            testbenches across VCS, Questa, and Xcelium &mdash; the examples
+            here come from that day-to-day work, not a textbook.
           </p>
         </div>
         <div>
@@ -143,7 +144,7 @@ export default function Home() {
             &ldquo;Roadmap to Verification Engineer&rdquo; is five focused docs
             &mdash; SystemVerilog, SVA, UVM, EDA Tools, and Python for VLSI
             &mdash; for engineers who want a study path instead of scattered
-            blog posts. $10 each, or $35 for all five.
+            blog posts. $10 each, or $49 for all five.
           </p>
         </div>
       </section>

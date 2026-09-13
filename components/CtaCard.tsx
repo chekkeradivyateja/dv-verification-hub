@@ -14,8 +14,9 @@ export default function CtaCard({ topic }: { topic?: string }) {
           Roadmap to Verification Engineer
         </h3>
         <p className="text-sm text-muted leading-relaxed">
-          Five in-depth docs covering SystemVerilog, SVA, UVM, EDA Tools, and
-          Python for VLSI. $10 each or $35 for the full bundle.
+          Five focused docs that turn scattered searching into a real study
+          path: SystemVerilog, SVA, UVM, EDA Tools, and Python for VLSI. $10
+          each, or all five for $49.
         </p>
         <a
           href={gumroadUrl}
@@ -35,8 +36,8 @@ export default function CtaCard({ topic }: { topic?: string }) {
           Free DV interview cheat-sheet
         </h3>
         <p className="text-sm text-muted leading-relaxed">
-          Get a free PDF chapter covering the most-asked UVM/SV interview
-          questions, straight to your inbox.
+          Get all 50 interview questions, with real answers, as a free PDF
+          &mdash; straight to your inbox.
         </p>
         <div className="mt-auto">
           <EmailSignupForm tag={topic ?? "general"} />

@@ -140,7 +140,7 @@ function main() {
     .fontSize(12)
     .fillColor(MUTED)
     .text(
-      '"Roadmap to Verification Engineer" is five focused docs -- SystemVerilog, SVA, UVM, EDA Tools, and Python for VLSI -- for engineers who want a study path instead of scattered blog posts. $10 each, or $35 for all five.',
+      '"Roadmap to Verification Engineer" is five focused docs -- SystemVerilog, SVA, UVM, EDA Tools, and Python for VLSI -- for engineers who want a study path instead of scattered blog posts. $10 each, or $49 for all five.',
       { width: doc.page.width - doc.page.margins.left - doc.page.margins.right }
     );
   doc.moveDown(1.2);
