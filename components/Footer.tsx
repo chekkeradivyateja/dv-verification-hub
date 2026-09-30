@@ -23,14 +23,9 @@ export default function Footer() {
           >
             Gumroad bundle
           </a>
-          <a
-            href="https://verechek-website.vercel.app"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hover:text-foreground transition-colors"
-          >
+          <Link href="/verechek" className="hover:text-foreground transition-colors">
             VereChek (early access)
-          </a>
+          </Link>
           <Link href="/privacy" className="hover:text-foreground transition-colors">
             Privacy
           </Link>

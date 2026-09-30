@@ -5,6 +5,7 @@ const LINKS = [
   { href: "/articles", label: "Articles" },
   { href: "/tools", label: "Tools" },
   { href: "/tools/interview-questions", label: "Interview Qs" },
+  { href: "/verechek", label: "VereChek" },
 ];
 
 export default function Nav() {
