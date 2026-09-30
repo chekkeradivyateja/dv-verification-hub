@@ -23,6 +23,15 @@ export default function Footer() {
           >
             Gumroad bundle
           </a>
+          <Link href="/privacy" className="hover:text-foreground transition-colors">
+            Privacy
+          </Link>
+          <Link href="/terms" className="hover:text-foreground transition-colors">
+            Terms
+          </Link>
+          <Link href="/disclaimer" className="hover:text-foreground transition-colors">
+            Disclaimer
+          </Link>
         </div>
       </div>
     </footer>
