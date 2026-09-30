@@ -34,6 +34,18 @@ export default function DisclaimerPage() {
         Trademarks (e.g. tool and vendor names) belong to their respective owners
         and are referenced for description only; those companies do not endorse us.
       </p>
+
+      <h2 className="mt-8 text-xl font-semibold text-foreground">Contact</h2>
+      <p className="mt-3 text-muted leading-relaxed">
+        {SITE_NAME} is operated by Teja. Questions:{" "}
+        <a
+          href="mailto:verechek.official@gmail.com"
+          className="text-accent-strong hover:underline"
+        >
+          verechek.official@gmail.com
+        </a>
+        .
+      </p>
     </div>
   );
 }

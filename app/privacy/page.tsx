@@ -16,6 +16,19 @@ export default function PrivacyPage() {
         This policy explains what data {SITE_NAME} collects and how it&rsquo;s used.
       </p>
 
+      <h2 className="mt-8 text-xl font-semibold text-foreground">Who operates this site</h2>
+      <p className="mt-3 text-muted leading-relaxed">
+        {SITE_NAME} is operated by Teja. For any privacy question or data
+        request, contact{" "}
+        <a
+          href="mailto:verechek.official@gmail.com"
+          className="text-accent-strong hover:underline"
+        >
+          verechek.official@gmail.com
+        </a>
+        .
+      </p>
+
       <h2 className="mt-8 text-xl font-semibold text-foreground">Email sign-ups</h2>
       <p className="mt-3 text-muted leading-relaxed">
         If you subscribe to receive the free cheat-sheet or updates, your email
@@ -54,14 +67,21 @@ export default function PrivacyPage() {
 
       <h2 className="mt-8 text-xl font-semibold text-foreground">Contact</h2>
       <p className="mt-3 text-muted leading-relaxed">
-        Reach us through our{" "}
+        Email{" "}
+        <a
+          href="mailto:verechek.official@gmail.com"
+          className="text-accent-strong hover:underline"
+        >
+          verechek.official@gmail.com
+        </a>{" "}
+        with any privacy questions, or reach us through our{" "}
         <a
           href="https://divyatejareddy.gumroad.com"
           className="text-accent-strong hover:underline"
         >
           Gumroad store
-        </a>{" "}
-        with any privacy questions.
+        </a>
+        .
       </p>
     </div>
   );

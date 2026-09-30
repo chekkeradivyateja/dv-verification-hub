@@ -57,6 +57,18 @@ export default function TermsPage() {
         We may update these terms; the &ldquo;last updated&rdquo; date shows the
         current version.
       </p>
+
+      <h2 className="mt-8 text-xl font-semibold text-foreground">Contact</h2>
+      <p className="mt-3 text-muted leading-relaxed">
+        {SITE_NAME} is operated by Teja. Questions about these terms:{" "}
+        <a
+          href="mailto:verechek.official@gmail.com"
+          className="text-accent-strong hover:underline"
+        >
+          verechek.official@gmail.com
+        </a>
+        .
+      </p>
     </div>
   );
 }
