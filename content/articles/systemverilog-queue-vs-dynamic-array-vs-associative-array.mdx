@@ -1,0 +1,104 @@
+---
+title: "SystemVerilog Queue vs Dynamic Array vs Associative Array"
+description: "Three flexible-size data structures that get confused constantly -- what each is actually optimized for, with real testbench use cases for each."
+topic: "sv-basics"
+date: "2026-02-21"
+keywords: ["systemverilog queue vs dynamic array", "associative array vs queue", "systemverilog data structures"]
+---
+
+All three grow at runtime, unlike a fixed-size static array — that's exactly
+why they get mixed up. Each is genuinely optimized for a different access
+pattern.
+
+## Dynamic array: contiguous, index-addressed, size known once
+
+```systemverilog
+int results[];
+results = new[10];        // allocate 10 elements
+results[5] = 42;
+results = new[20](results); // resize to 20, keep existing contents
+```
+
+A dynamic array behaves like a static array (contiguous storage,
+`O(1)` indexed access) except its size is set — and can be changed — at
+runtime instead of compile time. Use it when you know roughly how many
+elements you'll have and access is primarily by numeric index, but the
+exact count depends on something computed at run time (e.g., sized from a
+`parameter`, or from a value read out of a config file).
+
+## Queue: ordered, grows/shrinks from either end cheaply
+
+```systemverilog
+my_item pending_q[$];
+
+pending_q.push_back(new_item);      // add at the tail
+my_item next = pending_q.pop_front(); // remove from the head
+pending_q.insert(2, some_item);     // insert at a specific position
+int n = pending_q.size();
+```
+
+A queue is what you reach for when items are added and removed continuously
+during simulation, in FIFO or LIFO order — this is exactly the shape of a
+scoreboard's expected-transaction buffer (see our
+[UVM scoreboard example](/articles/uvm-scoreboard-example)):
+transactions arrive via `push_back()`, get matched and removed via
+`pop_front()`, and the queue's current size tells you how many are still
+outstanding. `push_back`/`pop_front`/`pop_back` are all efficient — a queue
+is specifically optimized for growth/shrinkage at either end, unlike a
+dynamic array where inserting/removing from the middle means shifting
+every subsequent element.
+
+## Associative array: sparse, keyed by value (not position)
+
+```systemverilog
+bit [31:0] mem_model [bit [31:0]];   // address -> data, sparse
+
+mem_model[32'h1000] = 32'hCAFEBABE;
+mem_model[32'hFFFF_0000] = 32'hDEAD_BEEF;
+
+if (mem_model.exists(addr))
+  data = mem_model[addr];
+else
+  data = 32'h0;  // never written -- model as reset/unknown value
+
+foreach (mem_model[a])
+  $display("addr=%0h data=%0h", a, mem_model[a]);
+```
+
+An associative array is keyed by an arbitrary type (an address, a string, an
+enum) rather than a dense 0-to-N index, and only stores entries that
+actually exist — a 32-bit address space modeled this way costs memory
+proportional to how many addresses were actually written, not 2^32 entries.
+This is the standard structure for a **memory model** in a testbench: real
+tests only ever touch a tiny, sparse fraction of the full address space, and
+`.exists()` cleanly distinguishes "never written" from "written with value
+0" — something a plain array indexed by address has no clean way to express
+without a separate tracking structure.
+
+## Choosing between them, as a decision
+
+| Need | Structure |
+|---|---|
+| Fixed-ish size, mostly indexed access, size known at some point before use | Dynamic array |
+| Constant push/pop at either end, order matters, size changes constantly | Queue |
+| Sparse key space, "did this ever get written" matters, key isn't a dense index | Associative array |
+
+A common real mistake: modeling a memory using a giant dynamic array sized
+to the full address range. It compiles and even works in simulation for a
+small address space, but for anything realistically sized (a 32-bit
+address space) it's either impossible to allocate or wildly wasteful —
+exactly the case an associative array exists to solve properly.
+
+## Interview-ready summary
+
+- **Dynamic array**: contiguous, indexed, resizable at runtime — the
+  flexible-size version of a plain array.
+- **Queue**: ordered, optimized specifically for adding/removing at either
+  end — the standard structure for a scoreboard's pending-transaction
+  buffer.
+- **Associative array**: sparse, keyed by arbitrary value (often an
+  address), with `.exists()` to distinguish "never written" from
+  "written with a zero value" — the standard structure for a memory model.
+- Picking the wrong one doesn't usually fail to compile — it just performs
+  badly or models the wrong semantics (e.g. can't distinguish "unwritten"
+  from "written zero"), which is exactly why this gets asked in interviews.

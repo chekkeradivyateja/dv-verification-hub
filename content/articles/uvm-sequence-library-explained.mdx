@@ -1,0 +1,139 @@
+---
+title: "UVM Sequence Library (uvm_sequence_library) Explained"
+description: "How uvm_sequence_library lets a test pick from a pool of registered sequences at runtime -- randomly, weighted, or by name -- instead of hardcoding one sequence per test."
+topic: "uvm"
+date: "2026-02-25"
+keywords: ["uvm_sequence_library example", "uvm sequence library", "uvm random sequence selection"]
+---
+
+Writing one dedicated test class per sequence scales badly once you have
+dozens of directed sequences. A sequence library flips the model: register a
+pool of sequences once, then let a single test randomly (or explicitly)
+select which ones actually run.
+
+## Defining a sequence library
+
+```systemverilog
+class my_seq_library extends uvm_sequence_library #(my_item);
+  `uvm_object_utils(my_seq_library)
+  `uvm_sequence_library_utils(my_seq_library)
+
+  function new(string name = "my_seq_library");
+    super.new(name);
+    init_sequence_library();
+  endfunction
+endclass
+```
+
+`` `uvm_sequence_library_utils `` wires up the internal machinery that lets
+this class hold a list of candidate sequence types and pick among them.
+
+## Registering candidate sequences
+
+```systemverilog
+class basic_write_seq extends uvm_sequence #(my_item);
+  `uvm_object_utils(basic_write_seq)
+  `uvm_add_to_seq_lib(basic_write_seq, my_seq_library)
+  // ... body() as normal
+endclass
+
+class corner_case_seq extends uvm_sequence #(my_item);
+  `uvm_object_utils(corner_case_seq)
+  `uvm_add_to_seq_lib(corner_case_seq, my_seq_library)
+  // ... body() as normal
+endclass
+
+class back_to_back_seq extends uvm_sequence #(my_item);
+  `uvm_object_utils(back_to_back_seq)
+  `uvm_add_to_seq_lib(back_to_back_seq, my_seq_library)
+  // ... body() as normal
+endclass
+```
+
+Each candidate sequence is a completely normal `uvm_sequence` — nothing
+about writing `basic_write_seq`'s `body()` changes. `` `uvm_add_to_seq_lib ``
+is a one-line registration that adds it to the named library's pool; the
+sequence class itself has no dependency on the library beyond that macro.
+
+## Running the library from a test
+
+```systemverilog
+class random_regression_test extends base_test;
+  `uvm_component_utils(random_regression_test)
+
+  task run_phase(uvm_phase phase);
+    my_seq_library lib = my_seq_library::type_id::create("lib");
+    phase.raise_objection(this);
+
+    lib.selection_mode = UVM_SEQ_LIB_RAND;  // pick randomly each time
+    lib.min_random_count = 20;
+    lib.max_random_count = 20;
+    lib.start(env.agent.sequencer);
+
+    phase.drop_objection(this);
+  endtask
+endclass
+```
+
+With `min_random_count`/`max_random_count` both set to 20, the library
+selects 20 sequences from its registered pool — by default with equal
+probability per sequence, run one after another — and executes them in that
+randomly-chosen order. Run the *same* test with a different `+ntb_random_seed`
+(or your simulator's equivalent) and you get a different combination and
+order of the same underlying sequences, which is exactly the point: one test
+class now represents an entire class of regression scenarios instead of one
+fixed one.
+
+## Selection modes
+
+```systemverilog
+lib.selection_mode = UVM_SEQ_LIB_RAND;   // uniform random selection
+lib.selection_mode = UVM_SEQ_LIB_RANDC;  // random, cyclic -- each sequence
+                                         // runs once before any repeats
+lib.selection_mode = UVM_SEQ_LIB_ITEM;   // run through in registration order
+lib.selection_mode = UVM_SEQ_LIB_USER;   // you override select_sequence()
+                                         // yourself for custom logic
+```
+
+`UVM_SEQ_LIB_RANDC` is the useful middle ground when you specifically want
+every registered sequence exercised at least once within a run, rather than
+relying on pure randomness to eventually cover them all (the same
+guaranteed-coverage idea as `randc` on a data field, see our
+[constrained random guide](/articles/systemverilog-constrained-random-example),
+applied to sequence *selection* instead of a value).
+
+## Weighting specific sequences
+
+```systemverilog
+class my_seq_library extends uvm_sequence_library #(my_item);
+  function new(string name = "my_seq_library");
+    super.new(name);
+    init_sequence_library();
+  endfunction
+
+  virtual function void init_sequence_library();
+    super.init_sequence_library();
+    // corner_case_seq should run 3x as often as an equally-weighted pick
+    set_selection_weight("corner_case_seq", 3);
+  endfunction
+endclass
+```
+
+`set_selection_weight()` biases `UVM_SEQ_LIB_RAND` selection without
+removing any sequence from the pool — useful for making a genuinely
+important corner-case sequence show up more often in a long random
+regression than a routine basic sequence would by pure chance.
+
+## Interview-ready summary
+
+- A sequence library is a registered *pool* of ordinary `uvm_sequence`
+  classes; `` `uvm_add_to_seq_lib `` is the only thing that changes about
+  writing a candidate sequence.
+- `min_random_count`/`max_random_count` control how many sequences get run
+  per `lib.start()` call; different random seeds produce different
+  combinations and orders from the same pool.
+- `UVM_SEQ_LIB_RANDC` guarantees every registered sequence runs at least
+  once before any repeat — useful when coverage of the whole pool matters,
+  not just probabilistic exposure.
+- `set_selection_weight()` biases which sequences get picked more often
+  under random selection, without excluding any from the pool entirely.

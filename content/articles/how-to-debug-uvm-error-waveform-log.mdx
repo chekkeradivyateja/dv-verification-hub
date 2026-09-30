@@ -1,0 +1,105 @@
+---
+title: "How to Debug a UVM_ERROR Using the Log and Waveform"
+description: "A practical, step-by-step process for tracing a UVM_ERROR from the log message back to the actual root cause in the waveform -- not just what the message says, but how to find why."
+topic: "uvm"
+date: "2026-02-13"
+keywords: ["how to debug uvm_error", "uvm error debugging waveform", "uvm scoreboard mismatch debug"]
+---
+
+This is one of the most common real interview questions ("walk me through
+how you'd debug a failing test") precisely because it tests process, not
+syntax. Here's the process that actually works, in order.
+
+## Step 1: read the message completely before touching a waveform
+
+```
+UVM_ERROR @ 15420: uvm_test_top.env.sb [SCOREBOARD_MISMATCH]
+  Expected: addr=32'h1000 data=32'hCAFEBABE
+  Actual  : addr=32'h1000 data=32'hCAFEBABE01
+```
+
+Before opening a waveform, extract three things from the message itself:
+**time** (`15420`), **hierarchy path** (`uvm_test_top.env.sb` — tells you
+exactly which component raised it), and **what specifically differs**
+(here: `data` is one hex digit longer in "Actual" — that's not a value
+mismatch, that's a *width* mismatch, which is a completely different bug
+class than a value mismatch and points you somewhere different from the
+start).
+
+## Step 2: work backwards from the reporting component, not the DUT
+
+The scoreboard reported this, but the scoreboard didn't *cause* it — it's
+just where the mismatch became visible. The actual root cause is upstream:
+either the DUT genuinely computed the wrong thing, or the monitor sampled it
+wrong, or the reference model predicted it wrong. Trace backwards in that
+order:
+
+1. **Is the reference model right?** Manually compute the expected value by
+   hand from the stimulus. If the reference model itself is wrong, the DUT
+   may be innocent and this is a testbench bug, not an RTL bug.
+2. **Is the monitor sampling correctly?** Check the monitor is sampling on
+   the right clock edge, at the right point in the protocol (e.g., not one
+   cycle too early relative to when data is actually valid).
+3. **Only then** — with the reference model and monitor cleared — treat this
+   as a real DUT bug.
+
+Most wasted debug time comes from skipping straight to "the DUT is wrong"
+without ruling out the testbench first.
+
+## Step 3: go to the waveform with a specific hypothesis, not a blank search
+
+Don't open the waveform and start scrolling. Go in with the specific
+question Step 1/2 gave you. For the width-mismatch example above: add the
+DUT's internal data bus and the monitor-sampled signal to the waveform,
+jump to time `15420`, and specifically check the **bit width** of the
+signal at that instant — is the DUT actually driving 33+ bits of nonzero
+data, or is the monitor's sampled variable declared with the wrong width
+and silently zero-extending/misaligning what it captures?
+
+```systemverilog
+// A classic cause of exactly this symptom: monitor declares the field
+// one bit too wide, or concatenates an extra status bit into the same
+// variable used for comparison.
+logic [32:0] data;   // should be [31:0] -- one bit too wide
+```
+
+## Step 4: check timing, not just values
+
+A huge fraction of "wrong value" mismatches are actually **timing**
+mismatches wearing a value-mismatch costume: the monitor sampled one cycle
+too early (data hadn't settled yet) or too late (data already moved on to
+the next transfer). In the waveform, look one cycle before and one cycle
+after the reported time — if the "expected" value appears cleanly at an
+adjacent cycle, the bug is a sampling-edge problem in the monitor, not a
+DUT logic error at all.
+
+## Step 5: check for X-propagation specifically
+
+```systemverilog
+if ($isunknown(item.data)) begin
+  `uvm_error("XPROP", $sformatf("data went unknown at time %0t", $time))
+end
+```
+
+An "actual" value that's suspiciously all-zero, all-F, or doesn't match
+*any* plausible computation often means the signal was actually `X` at
+sample time, and the simulator's X-to-known conversion (or the testbench's
+own handling of `X` in a comparison) silently turned it into something that
+just looks like a wrong value. `$isunknown()` in a waveform cursor check, or
+adding an explicit X-check to the monitor, catches this class directly
+instead of chasing a "wrong value" that was never really a value at all.
+
+## Interview-ready summary
+
+- Read the full error message first — hierarchy path, time, and exactly
+  *what kind* of mismatch (value vs. width vs. timing) before opening any
+  waveform.
+- Work backwards from the reporting component (usually the scoreboard) —
+  rule out the reference model and the monitor before assuming the DUT is
+  wrong.
+- Go to the waveform with a specific hypothesis from steps 1-2, not a blind
+  scroll.
+- Check the cycle before and after the reported time — a huge fraction of
+  "wrong value" bugs are actually monitor sampling-edge bugs.
+- Explicitly check for `X` with `$isunknown()` before trusting that a
+  suspicious value is a real computed value at all.

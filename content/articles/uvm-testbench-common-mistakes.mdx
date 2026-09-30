@@ -1,0 +1,140 @@
+---
+title: "UVM Testbench Common Mistakes (and How to Actually Fix Them)"
+description: "The mistakes that show up over and over in real UVM testbenches -- not syntax errors, but structural choices that cause hangs, false passes, and hard-to-debug flakiness."
+topic: "uvm"
+date: "2026-02-23"
+keywords: ["uvm common mistakes", "uvm testbench hangs", "uvm false pass"]
+---
+
+None of these are syntax errors — the code compiles fine, often runs fine
+for a while, and then produces a hang, a false pass, or a flaky failure that
+looks unrelated to its actual cause. That's exactly what makes this class of
+mistake worth knowing in advance.
+
+## 1. Comparing transaction objects with `==` instead of `.compare()`
+
+```systemverilog
+// WRONG: compares handles (references), not contents
+if (expected == actual) ...
+
+// RIGHT: field-by-field content comparison
+if (expected.compare(actual)) ...
+```
+
+`==` on two class handles checks whether they point to the *same object*,
+not whether their fields match. Two separately-`new()`'d transactions with
+identical field values are never `==`-equal. Covered in more depth in our
+[UVM scoreboard example](/articles/uvm-scoreboard-example).
+
+## 2. Forgetting to drop an objection (or dropping it in the wrong place)
+
+```systemverilog
+task run_phase(uvm_phase phase);
+  phase.raise_objection(this);
+  seq.start(sequencer);
+  // forgot phase.drop_objection(this) -- simulation hangs until timeout
+endtask
+```
+
+Covered in depth in our
+[UVM objection mechanism guide](/articles/uvm-objection-mechanism-explained)
+— this remains one of the single most common causes of a hung regression,
+and the fix is always the same: audit every `raise_objection` for a matching
+`drop_objection` on every code path, including error paths.
+
+## 3. Building components outside `build_phase`
+
+```systemverilog
+class my_env extends uvm_env;
+  my_agent agent = new("agent", this);  // WRONG -- constructed at
+                                        // elaboration time, not build_phase
+  function void build_phase(uvm_phase phase);
+    // agent already exists here, factory overrides set in a test's
+    // build_phase are already too late to affect it
+  endfunction
+endclass
+```
+
+Constructing a component as a class member's default initializer (instead of
+inside `build_phase`) means it's built before any test's `build_phase` has a
+chance to run `set_type_override`/`config_db::set()` — the factory
+override or config value exists, but the component that would have used it
+is already built. This is a subtle bug because the environment *works*, just
+never picks up any override a test tries to apply to it.
+
+## 4. Connecting TLM ports in `build_phase` instead of `connect_phase`
+
+```systemverilog
+function void build_phase(uvm_phase phase);
+  agent = my_agent::type_id::create("agent", this);
+  agent.monitor.port.connect(sb.export);  // WRONG -- sb doesn't exist yet
+                                          // if it's built in a SIBLING
+                                          // component's build_phase
+endfunction
+```
+
+`build_phase` is top-down: a parent's `build_phase` runs before its
+children's, but there's no guarantee about ordering *between* sibling
+components' `build_phase` calls. `connect_phase` is bottom-up specifically
+so every child is guaranteed fully built by the time connections happen —
+moving `.connect()` calls there is the fix, covered in our
+[UVM phases guide](/articles/uvm-phases-explained-in-order).
+
+## 5. A scoreboard that never flags an empty expected queue
+
+```systemverilog
+function void write_actual(my_item actual);
+  if (exp_q.size() == 0) return;  // WRONG -- silently drops an
+                                  // unexpected actual transaction
+  my_item exp = exp_q.pop_front();
+  ...
+endfunction
+```
+
+An actual transaction arriving with nothing in the expected queue is itself
+a real bug signal (the DUT produced something nobody predicted) — silently
+returning instead of flagging it means a real functional bug produces zero
+test failures. This should always be `` `uvm_error(...) ``, not a quiet
+`return`.
+
+## 6. Randomizing without checking the return value
+
+```systemverilog
+item.randomize();  // WRONG -- return value silently discarded
+```
+
+`randomize()` returns `0` on an unsatisfiable constraint set. Ignoring the
+return value means a broken/contradictory constraint (see our
+[constrained random guide](/articles/systemverilog-constrained-random-example))
+produces a transaction with **stale field values from before the call**,
+silently — no error, no warning, just wrong stimulus that looks like it came
+from a working `randomize()` call.
+
+```systemverilog
+if (!item.randomize())
+  `uvm_error(get_type_name(), "Randomization failed")
+```
+
+## 7. Hardcoding a simulation time limit instead of using objections properly
+
+```systemverilog
+initial #1_000_000 $finish;  // "safety net" that masks real hangs
+```
+
+A blanket timeout like this doesn't fix a hang-causing bug (mistake #2,
+for instance) — it just converts an infinite hang into a fixed-length
+run that finishes "successfully" from the shell's point of view while the
+actual test never completed what it was supposed to. `+UVM_TIMEOUT` (a
+command-line plusarg) is the correct safety net — it still catches a
+genuine hang, but as an explicit UVM_FATAL identifying the timeout, not a
+silent, misleadingly-clean `$finish`.
+
+## Interview-ready summary
+
+Every mistake on this list shares the same shape: the code **compiles and
+often appears to work**, and the actual symptom (a hang, a false pass, silently
+stale stimulus) shows up somewhere else, later, disconnected from its real
+cause. That disconnect — not unfamiliar syntax — is what makes UVM debugging
+genuinely hard, and it's exactly why interviewers ask about these specific
+mistakes: they're testing whether you've actually been burned by one, not
+whether you've memorized the API.

@@ -1,0 +1,128 @@
+---
+title: "UVM Analysis Port vs Analysis Export vs Analysis Imp"
+description: "The three analysis-side TLM types get confused constantly because they connect to each other -- here's what each one actually is and how to know which one a component needs."
+topic: "uvm"
+date: "2026-03-01"
+keywords: ["uvm analysis port vs export vs imp", "uvm_analysis_imp example", "uvm_analysis_port connect"]
+---
+
+All three carry the same `write(T t)` call from a publisher to a subscriber.
+The difference is **which role** in that relationship each one plays, and
+UVM's TLM connection rules only let compatible roles connect to each other.
+
+## `uvm_analysis_port`: the publisher's handle
+
+```systemverilog
+class my_monitor extends uvm_monitor;
+  uvm_analysis_port #(my_item) item_collected_port;
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+    item_collected_port = new("item_collected_port", this);
+  endfunction
+
+  task run_phase(uvm_phase phase);
+    my_item item;
+    forever begin
+      // ... sample a transaction into item ...
+      item_collected_port.write(item);   // broadcast to every subscriber
+    end
+  endtask
+endclass
+```
+
+A monitor declares an `analysis_port` and calls `.write()` whenever it has a
+transaction to publish. It doesn't know or care how many things are
+listening — zero, one, or five subscribers, the monitor's code never
+changes.
+
+## `uvm_analysis_imp`: the subscriber that implements `write()` itself
+
+```systemverilog
+class my_scoreboard extends uvm_scoreboard;
+  `uvm_component_utils(my_scoreboard)
+
+  uvm_analysis_imp #(my_item, my_scoreboard) item_export;
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+    item_export = new("item_export", this);
+  endfunction
+
+  // This IS the write() the port's .write() call ultimately invokes.
+  function void write(my_item item);
+    // compare against expected, etc.
+  endfunction
+endclass
+```
+
+`uvm_analysis_imp #(T, IMP)` is the subscriber-side type when the subscriber
+implements `write()` **directly on itself** — the scoreboard class itself
+has a `write()` method, and `item_export` is just the connectable handle
+that routes calls to it. This is why the type is parameterized by both the
+transaction type *and* the implementing class (`IMP`) — it needs to know
+whose `write()` to actually call.
+
+## `uvm_analysis_export`: a pass-through, not an endpoint
+
+```systemverilog
+class my_env extends uvm_env;
+  uvm_analysis_port #(my_item) item_export;  // env-level pass-through
+
+  function void build_phase(uvm_phase phase);
+    item_export = new("item_export", this);
+  endfunction
+
+  function void connect_phase(uvm_phase phase);
+    agent.monitor.item_collected_port.connect(this.item_export);
+  endfunction
+endclass
+```
+
+An `export` exists for exactly one reason: an **intermediate** component
+(like an env, which doesn't itself consume transactions) needs to expose a
+connection point that forwards to something *inside* it, without being the
+final consumer itself. The env in this example doesn't implement `write()`
+— it just re-exposes a connection point so something *outside* the env
+(a top-level scoreboard, say) can connect through it to whatever's actually
+inside.
+
+## Why `uvm_tlm_analysis_fifo` avoids needing a custom `write()`
+
+Covered in more depth in our
+[mailbox vs TLM FIFO guide](/articles/systemverilog-mailbox-vs-tlm-fifo) —
+`uvm_tlm_analysis_fifo` already provides its own internal `analysis_export`
+and its own internal `write()` (which just pushes into the FIFO), so a
+scoreboard using one doesn't need to implement `uvm_analysis_imp`/`write()`
+itself at all; it just calls `.get()` on the FIFO from its own `run_phase`
+instead.
+
+## The connection rule that makes this all click
+
+```systemverilog
+monitor.item_collected_port.connect(scoreboard.item_export);  // port -> imp
+monitor.item_collected_port.connect(env.item_export);         // port -> export (pass-through)
+env.item_export.connect(scoreboard.item_export);              // export -> imp
+```
+
+A `port` (publisher) connects to either an `export` (pass-through) or an
+`imp` (real endpoint). An `export` can chain to another `export` or
+eventually terminate at an `imp` — but a chain always has to **end** at an
+`imp` somewhere, since that's the only one of the three that actually
+implements `write()`. If you ever get a connection-type mismatch error at
+elaboration time, it's almost always because something expected to be a
+final endpoint (`imp`) is actually just a pass-through (`export`) with
+nothing connected on its other side, or vice versa.
+
+## Interview-ready summary
+
+- **`analysis_port`**: the publisher's handle — calls `.write()`, doesn't
+  know or care who's listening.
+- **`analysis_imp`**: the real subscriber endpoint — parameterized by both
+  the transaction type and the class that implements `write()` itself.
+- **`analysis_export`**: a pass-through connection point on an intermediate
+  component (like an env) that doesn't implement `write()` itself, just
+  forwards the connection further in.
+- A connection chain always has to terminate at an `imp` (or something that
+  wraps one, like `uvm_tlm_analysis_fifo`) — `export`s alone don't do
+  anything without something real on the other end.

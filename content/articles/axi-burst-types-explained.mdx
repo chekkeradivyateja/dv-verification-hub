@@ -1,0 +1,112 @@
+---
+title: "AXI Burst Types Explained: FIXED, INCR, and WRAP"
+description: "What AWBURST/ARBURST actually controls, how address advances differently for each of the three burst types, and what a verification engineer needs to check for each."
+topic: "protocols"
+date: "2026-02-19"
+keywords: ["axi burst types", "axi fixed incr wrap", "axi awburst example"]
+---
+
+Our [AXI vs APB guide](/articles/axi-vs-apb-verification-differences) covers
+AXI's channel structure at a high level. Burst type is where a lot of the
+real verification complexity actually lives — `AWBURST`/`ARBURST` is only 2
+bits, but it changes how the address advances across every beat of the
+burst, and each type has its own set of legal-vs-illegal configurations
+worth checking.
+
+## The three types
+
+```systemverilog
+typedef enum bit [1:0] {
+  FIXED = 2'b00,
+  INCR  = 2'b01,
+  WRAP  = 2'b10
+  // 2'b11 is reserved -- not a legal AXI burst type
+} axi_burst_t;
+```
+
+## FIXED: every beat, same address
+
+```
+AWADDR = 0x1000, AWLEN = 3 (4 beats), AWBURST = FIXED
+Beat 0: addr = 0x1000
+Beat 1: addr = 0x1000
+Beat 2: addr = 0x1000
+Beat 3: addr = 0x1000
+```
+
+Every beat targets the **same** address. This isn't a niche case — it's the
+standard pattern for a FIFO-mapped peripheral register: writing 4 beats of
+data into one FIFO push register at a fixed address, letting the peripheral
+itself advance internally. Verification-wise, the thing worth explicitly
+checking is that the DUT genuinely treats every beat as a fresh write to the
+same location, not accidentally auto-incrementing internally when it
+shouldn't.
+
+## INCR: address increments by the transfer size each beat
+
+```
+AWADDR = 0x1000, AWLEN = 3 (4 beats), AWSIZE = 2 (4 bytes/beat), AWBURST = INCR
+Beat 0: addr = 0x1000
+Beat 1: addr = 0x1004
+Beat 2: addr = 0x1008
+Beat 3: addr = 0x100C
+```
+
+The most common burst type for genuine memory access — sequential reads/
+writes to consecutive addresses, sized by `AWSIZE` (encoded as
+`2^AWSIZE` bytes per beat). Verification-wise, the real edge case is an
+**unaligned starting address**: AXI allows `AWADDR` to not be aligned to
+`AWSIZE` for the *first* beat of an INCR burst (a "narrow, unaligned"
+transfer), but subsequent beats still advance by the full transfer size from
+that unaligned start — a design that assumes every beat is naturally aligned
+will break the moment a real bus master issues an unaligned INCR burst,
+which is legal AXI, not an error case.
+
+## WRAP: increments like INCR, but wraps at a boundary
+
+```
+AWADDR = 0x1006, AWLEN = 3 (4 beats), AWSIZE = 1 (2 bytes/beat), AWBURST = WRAP
+Wrap boundary = (AWLEN+1) * (2^AWSIZE) = 4 * 2 = 8 bytes -> aligned to 0x1000
+Beat 0: addr = 0x1006
+Beat 1: addr = 0x1000   <- wrapped back to the boundary, not 0x1008
+Beat 2: addr = 0x1002
+Beat 3: addr = 0x1004
+```
+
+WRAP bursts increment exactly like INCR, but once the address reaches the
+**wrap boundary** (the total burst size, aligned down from the start
+address), it wraps back to the start of that aligned block instead of
+continuing past it. This exists specifically for cache-line-fill transfers:
+a CPU requesting a critical word first (the actual word it's waiting on)
+followed by the rest of the cache line, wrapping around so every byte of the
+line gets filled starting from wherever the critical word happened to sit
+inside it. AXI requires `AWLEN+1` to be 2, 4, 8, or 16 for a WRAP burst
+specifically because the wrap boundary math only produces a sensible,
+naturally-aligned block for those beat counts — a WRAP burst with, say,
+`AWLEN=2` (3 beats) is illegal and worth an explicit assertion catching it,
+not just a functional coverage bin.
+
+## What to actually check for each, as a verification engineer
+
+| Burst type | Key thing to verify |
+|---|---|
+| FIXED | DUT doesn't silently auto-increment when it shouldn't |
+| INCR | Unaligned starting address is handled, not just the common aligned case |
+| WRAP | Wrap boundary math matches spec exactly; illegal beat counts (not 2/4/8/16) are rejected, not silently accepted |
+
+A covergroup for burst behavior should cross burst type against both aligned
+and unaligned starting addresses, and specifically include a WRAP-at-boundary
+crossing (the beat where address wraps) — that exact transition is where
+off-by-one address-generation bugs in a DUT's internal burst counter tend to
+live.
+
+## Interview-ready summary
+
+- **FIXED**: same address every beat — typical for a FIFO-mapped register.
+- **INCR**: address advances by the transfer size each beat — general memory
+  access; unaligned starting addresses are legal and often under-tested.
+- **WRAP**: advances like INCR but wraps at a size-aligned boundary — built
+  for cache-line fills; legal beat counts are strictly 2, 4, 8, or 16.
+- `2'b11` is reserved, not a fourth legal burst type — a DUT or testbench
+  encountering it should flag it as an error, not silently interpret it as
+  one of the other three.

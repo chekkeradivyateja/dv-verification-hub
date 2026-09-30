@@ -1,0 +1,142 @@
+---
+title: "UVM Callback Mechanism Explained"
+description: "How uvm_callback lets you inject extra behavior into an existing component without editing or subclassing it, with a working driver-callback example."
+topic: "uvm"
+date: "2026-02-03"
+keywords: ["uvm callback mechanism", "uvm_callback example", "uvm_register_cb"]
+---
+
+The factory (see our [factory pattern guide](/articles/uvm-factory-pattern-overrides))
+lets you swap *which class* gets constructed. Callbacks solve a different
+problem: injecting extra behavior into an *existing, already-instantiated*
+component at specific points, without subclassing it and without knowing in
+advance what that behavior will be.
+
+## The problem callbacks solve
+
+Say a `driver` class is shared across a whole team's environments. One test
+needs to inject a protocol violation right before driving a transaction — but
+factory-overriding the whole driver class just to change one method is heavy,
+and every override has to re-implement everything the original driver already
+does correctly. Callbacks let you hook a specific point in the driver's
+execution without touching the driver class at all.
+
+## Declaring a callback type
+
+```systemverilog
+class my_driver_callback extends uvm_callback;
+  `uvm_object_utils(my_driver_callback)
+
+  function new(string name = "my_driver_callback");
+    super.new(name);
+  endfunction
+
+  // Default (empty) implementation -- subclasses override what they need.
+  virtual task pre_drive(my_driver drv, my_item item);
+  endtask
+
+  virtual function void post_drive(my_driver drv, my_item item);
+  endfunction
+endclass
+```
+
+The base callback's methods are empty by default — a callback subclass only
+overrides the specific hook it actually cares about.
+
+## Making the driver callback-aware
+
+```systemverilog
+`uvm_register_cb(my_driver, my_driver_callback)
+
+class my_driver extends uvm_driver #(my_item);
+  `uvm_component_utils(my_driver)
+
+  task run_phase(uvm_phase phase);
+    forever begin
+      my_item item;
+      seq_item_port.get_next_item(item);
+
+      `uvm_do_callbacks(my_driver, my_driver_callback, pre_drive(this, item))
+
+      drive_item(item);
+
+      `uvm_do_callbacks(my_driver, my_driver_callback, post_drive(this, item))
+
+      seq_item_port.item_done();
+    end
+  endtask
+
+  task drive_item(my_item item);
+    // real pin-wiggling logic
+  endtask
+endclass
+```
+
+`` `uvm_register_cb(my_driver, my_driver_callback) `` (a one-time macro at file
+scope) registers that this specific callback type is legal to attach to this
+specific component type. `` `uvm_do_callbacks(my_driver, my_driver_callback,
+pre_drive(this, item)) `` calls `pre_drive()` on *every* callback object
+currently attached to this driver instance — zero callbacks attached means
+this is a no-op, so a driver with callback hooks compiled in behaves
+identically to one without, until something actually attaches one.
+
+## Attaching a callback from a test
+
+```systemverilog
+class inject_error_callback extends my_driver_callback;
+  `uvm_object_utils(inject_error_callback)
+
+  function new(string name = "inject_error_callback");
+    super.new(name);
+  endfunction
+
+  virtual task pre_drive(my_driver drv, my_item item);
+    if ($urandom_range(0, 9) == 0) begin
+      `uvm_info(get_type_name(), "Injecting a corrupted address", UVM_LOW)
+      item.addr = item.addr ^ 32'hDEAD_0000;
+    end
+  endtask
+endclass
+
+class error_injection_test extends base_test;
+  `uvm_component_utils(error_injection_test)
+
+  function void end_of_elaboration_phase(uvm_phase phase);
+    inject_error_callback cb = inject_error_callback::type_id::create("cb");
+    uvm_callbacks#(my_driver, my_driver_callback)::add(env.agent.driver, cb);
+  endfunction
+endclass
+```
+
+`uvm_callbacks#(my_driver, my_driver_callback)::add(target, cb)` attaches
+`cb` to one specific driver instance. Nothing about `my_driver`'s own source
+was touched — the shared, already-verified driver class works completely
+unmodified in every other test, and this one test adds error injection purely
+by attaching an extra object.
+
+## Callbacks vs. the factory: when to use which
+
+| | Factory override | Callback |
+|---|---|---|
+| Replaces | The whole class | One specific hook point |
+| Scope | Every instance (type override) or one path (instance override) | One specific object you explicitly attach it to |
+| Requires | A full subclass reimplementing everything | A thin subclass overriding just the hook(s) you need |
+| Typical use | Swap an entire component's implementation | Inject/observe behavior at one point without touching the rest |
+
+A rule of thumb: if you're changing *what the component fundamentally is*,
+use the factory. If you're adding *one extra behavior at one specific point*
+in an otherwise-unchanged component, use a callback.
+
+## Interview-ready summary
+
+- `` `uvm_register_cb `` links a callback type to a component type;
+  `` `uvm_do_callbacks `` is the hook point inside the component that invokes
+  every currently-attached callback.
+- Callback methods default to empty — a component with the hook compiled in
+  behaves identically to one without, until a callback is actually attached.
+- `uvm_callbacks#(COMP, CB)::add(target, cb)` attaches a callback object to
+  one specific component instance, from a test, without modifying or
+  subclassing that component.
+- Callbacks are for injecting/observing behavior at a known point in an
+  unmodified, shared component; the factory is for replacing what a
+  component fundamentally is.

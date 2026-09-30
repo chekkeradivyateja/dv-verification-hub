@@ -1,0 +1,118 @@
+---
+title: "UVM run_phase vs the Runtime Sub-Phases (reset/configure/main/shutdown)"
+description: "run_phase isn't one monolithic phase -- it has twelve time-consuming sub-phases running in parallel across the testbench. Here's what each one is actually for."
+topic: "uvm"
+date: "2026-02-11"
+keywords: ["uvm run_phase vs main_phase", "uvm runtime phases", "uvm reset_phase configure_phase shutdown_phase"]
+---
+
+Our [UVM phases guide](/articles/uvm-phases-explained-in-order) covers the
+full build→connect→run→report sequence at a high level. This one goes
+deeper into something that trips people up: `run_phase` isn't actually one
+phase — it's a task that wraps twelve finer-grained "runtime" sub-phases,
+and most real testbenches hook those instead of `run_phase` directly.
+
+## The runtime sub-phases, in order
+
+```
+run_phase
+  ├─ pre_reset_phase
+  ├─ reset_phase
+  ├─ post_reset_phase
+  ├─ pre_configure_phase
+  ├─ configure_phase
+  ├─ post_configure_phase
+  ├─ pre_main_phase
+  ├─ main_phase
+  ├─ post_main_phase
+  ├─ pre_shutdown_phase
+  ├─ shutdown_phase
+  └─ post_shutdown_phase
+```
+
+Every one of these runs in parallel *across every component in the
+testbench* — i.e., every component's `reset_phase` executes concurrently
+with every other component's `reset_phase`, and the whole group only
+advances to `configure_phase` once every component's `reset_phase` has
+either finished or dropped its objection. This is what actually
+synchronizes, say, a driver waiting through reset with a scoreboard that
+shouldn't start comparing yet.
+
+## Why hook these instead of `run_phase` directly
+
+```systemverilog
+class my_driver extends uvm_driver #(my_item);
+  `uvm_component_utils(my_driver)
+
+  task reset_phase(uvm_phase phase);
+    phase.raise_objection(this);
+    vif.reset_n <= 0;
+    repeat (10) @(posedge vif.clk);
+    vif.reset_n <= 1;
+    phase.drop_objection(this);
+  endtask
+
+  task main_phase(uvm_phase phase);
+    phase.raise_objection(this);
+    forever begin
+      my_item item;
+      seq_item_port.get_next_item(item);
+      drive_item(item);
+      seq_item_port.item_done();
+    end
+    // (objection is dropped elsewhere, e.g. by a test controlling
+    //  overall run length, or an explicit drop after N items)
+  endtask
+endclass
+```
+
+Splitting drive-under-reset logic into `reset_phase` and normal traffic into
+`main_phase` means other components can rely on phase *boundaries* for
+synchronization — a scoreboard's `main_phase` starting is a guarantee that
+every component's `reset_phase` has already completed, without any manual
+signaling between components to establish that. Doing everything inside one
+big `run_phase` loses that free synchronization point entirely; you'd have
+to build it yourself with events or semaphores.
+
+## Objections are per-sub-phase, not per-run_phase
+
+This is the detail that actually matters for real testbenches: each
+sub-phase has its own **independent** objection count. A component that
+raises an objection in `reset_phase` and drops it there does not hold up
+`main_phase` at all — the overall `run_phase` only appears to run
+continuously because these sub-phases execute back-to-back automatically,
+but each transition genuinely waits for that specific sub-phase's
+objections to clear, not for one giant `run_phase`-wide count.
+
+## `shutdown_phase`: draining, not stopping abruptly
+
+```systemverilog
+task shutdown_phase(uvm_phase phase);
+  phase.raise_objection(this);
+  wait (outstanding_transactions == 0);
+  phase.drop_objection(this);
+endtask
+```
+
+`shutdown_phase` exists specifically for "let in-flight work finish cleanly"
+logic — a scoreboard waiting for its expected-transaction queue to drain, a
+monitor waiting for a final response — *after* `main_phase` has stopped
+generating new stimulus but *before* the whole simulation ends. Without it,
+components tend to crowd this draining logic into the end of `main_phase`
+itself, mixing "generate stimulus" and "wind down" concerns in the same
+method.
+
+## Interview-ready summary
+
+- `run_phase` isn't one phase — it's twelve runtime sub-phases
+  (`reset`/`configure`/`main`/`shutdown`, each with a `pre_`/`post_`
+  variant) that run in parallel across the whole testbench, advancing as a
+  group.
+- Hooking `reset_phase`/`main_phase`/`shutdown_phase` directly (instead of
+  one big `run_phase`) gives every component a shared, automatic
+  synchronization point at each sub-phase boundary — no manual event
+  signaling required to know "reset is done everywhere."
+- Objections are tracked **per sub-phase**, independently — dropping an
+  objection in `reset_phase` doesn't affect `main_phase`'s own count.
+- `shutdown_phase` is specifically for draining in-flight work after
+  stimulus generation stops, separate from `main_phase`'s own logic.

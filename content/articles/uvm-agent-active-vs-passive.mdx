@@ -1,0 +1,110 @@
+---
+title: "UVM Agent: Active vs Passive Explained"
+description: "What actually changes inside a uvm_agent between active and passive mode, how is_active controls it, and when a real testbench needs a passive agent."
+topic: "uvm"
+date: "2026-02-17"
+keywords: ["uvm active vs passive agent", "uvm is_active example", "uvm passive agent example"]
+---
+
+Every real UVM agent has to answer one question about itself: does it drive
+the DUT, or only watch it? That's the active/passive distinction, and it's
+controlled by exactly one field.
+
+## The `is_active` field
+
+```systemverilog
+class my_agent extends uvm_agent;
+  `uvm_component_utils(my_agent)
+
+  my_driver    driver;
+  my_sequencer sequencer;
+  my_monitor   monitor;
+
+  function void build_phase(uvm_phase phase);
+    monitor = my_monitor::type_id::create("monitor", this);
+
+    if (get_is_active() == UVM_ACTIVE) begin
+      driver    = my_driver::type_id::create("driver", this);
+      sequencer = my_sequencer::type_id::create("sequencer", this);
+    end
+  endfunction
+
+  function void connect_phase(uvm_phase phase);
+    if (get_is_active() == UVM_ACTIVE)
+      driver.seq_item_port.connect(sequencer.seq_item_export);
+  endfunction
+endclass
+```
+
+`is_active` is a built-in field on `uvm_agent` (type `uvm_active_passive_enum`,
+values `UVM_ACTIVE`/`UVM_PASSIVE`). The **monitor is always built** — an
+agent watches the bus regardless of mode. The **driver and sequencer are only
+built when active** — a passive agent has nothing to drive with, so building
+them would be dead, unconnected code.
+
+## Setting it from outside the agent
+
+```systemverilog
+class my_test extends uvm_test;
+  function void build_phase(uvm_phase phase);
+    uvm_config_db#(uvm_active_passive_enum)::set(
+      this, "env.slave_agent", "is_active", UVM_PASSIVE);
+  endfunction
+endclass
+```
+
+This is set via `config_db` (see our
+[config_db vs resource_db guide](/articles/uvm-config-db-vs-resource-db)),
+*before* the agent's own `build_phase` runs, following the same top-down
+build-phase ordering that makes any config_db override work. The agent reads
+it back with `get_is_active()`, which internally does the `config_db::get()`
+lookup for you.
+
+## When a real testbench actually needs a passive agent
+
+The most common real case: **you don't own both sides of the bus.** If
+another team's active master agent is already driving a shared bus in a
+larger SoC-level environment, and you only need to *observe and check* that
+bus from your block's environment, an active agent would try to drive
+signals someone else already owns — a real, confirmed contention bug. A
+passive agent for that same interface only builds a monitor, watches without
+driving anything, and can feed a scoreboard/coverage model exactly like an
+active agent's monitor would.
+
+```systemverilog
+class soc_env extends uvm_env;
+  cpu_agent  cpu_ag;   // UVM_ACTIVE  -- we drive CPU-side stimulus
+  mem_agent  mem_ag;   // UVM_PASSIVE -- memory controller drives this side,
+                       // we only watch and check
+  function void build_phase(uvm_phase phase);
+    cpu_ag = cpu_agent::type_id::create("cpu_ag", this);
+    mem_ag = mem_agent::type_id::create("mem_ag", this);
+    uvm_config_db#(uvm_active_passive_enum)::set(
+      this, "mem_ag", "is_active", UVM_PASSIVE);
+  endfunction
+endclass
+```
+
+## Reusing one agent class for both roles
+
+The real payoff of the active/passive split is that it's **the same agent
+class** either way — you write `my_agent` once, and whether it drives
+depends entirely on a config setting from whatever test/environment
+instantiates it. A block-level environment might use the agent actively (it
+owns and drives that interface in isolation); a chip-level environment
+assembling several blocks might reuse the *exact same agent class* passively
+for that same interface, because at chip level something else now drives it.
+No agent code changes between the two — only the `is_active` setting does.
+
+## Interview-ready summary
+
+- `is_active` (`UVM_ACTIVE`/`UVM_PASSIVE`) controls whether an agent builds a
+  driver+sequencer; the monitor is always built regardless.
+- Set it via `config_db#(uvm_active_passive_enum)::set(...)` before the
+  agent's `build_phase` runs; read with `get_is_active()`.
+- The real-world driver for passive mode: you don't own that side of the
+  interface (another team/block already drives it) but still need to
+  observe and check it.
+- The point of the split is reusing one agent class unmodified across both
+  roles — block-level environments might drive an interface actively that a
+  chip-level environment assembling multiple blocks reuses passively.

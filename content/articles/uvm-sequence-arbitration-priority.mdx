@@ -1,0 +1,116 @@
+---
+title: "UVM Sequence Arbitration and Priority Explained"
+description: "What happens when multiple sequences run on the same sequencer at once -- arbitration modes, priority, and lock/grab, with a worked example."
+topic: "uvm"
+date: "2026-02-07"
+keywords: ["uvm sequence arbitration", "uvm sequencer priority", "uvm lock grab sequence"]
+---
+
+A sequencer can have more than one sequence running against it at the same
+time — a background "keep the bus busy" sequence plus a foreground directed
+one, for example. When both have an item ready via `start_item()`
+simultaneously, something has to decide which goes first. That's
+arbitration.
+
+## Starting two sequences on one sequencer
+
+```systemverilog
+task body();
+  background_traffic_seq bg = background_traffic_seq::type_id::create("bg");
+  directed_error_seq     fg = directed_error_seq::type_id::create("fg");
+
+  fork
+    bg.start(env.agent.sequencer);
+    fg.start(env.agent.sequencer);
+  join
+endtask
+```
+
+Both sequences are now independently calling `start_item()`/`finish_item()`
+against the *same* sequencer. The sequencer's arbitration mode decides which
+one's pending item actually gets sent to the driver next whenever more than
+one is ready at once.
+
+## Arbitration modes
+
+```systemverilog
+env.agent.sequencer.set_arbitration(UVM_SEQ_ARB_FIFO);       // default
+env.agent.sequencer.set_arbitration(UVM_SEQ_ARB_WEIGHTED);
+env.agent.sequencer.set_arbitration(UVM_SEQ_ARB_RANDOM);
+env.agent.sequencer.set_arbitration(UVM_SEQ_ARB_STRICT_FIFO);
+env.agent.sequencer.set_arbitration(UVM_SEQ_ARB_STRICT_RANDOM);
+```
+
+- **`UVM_SEQ_ARB_FIFO`** (the default): whichever sequence called
+  `start_item()` first gets serviced first, across all sequences.
+- **`UVM_SEQ_ARB_WEIGHTED`**: probability-weighted by each sequence's
+  `set_priority()` value — higher priority means more likely to win, not
+  guaranteed to win every time.
+- **`UVM_SEQ_ARB_STRICT_FIFO`** / **`UVM_SEQ_ARB_STRICT_RANDOM`**: within a
+  single priority level, FIFO or random order; a higher-priority sequence's
+  pending item *always* wins over a lower-priority one's, no probability
+  involved.
+- **`UVM_SEQ_ARB_RANDOM`**: arbitrary order, priority ignored.
+
+## Setting priority
+
+```systemverilog
+task body();
+  fg.set_priority(200);  // higher than the default 100
+  fg.start(env.agent.sequencer);
+endtask
+```
+
+Priority is meaningless under `UVM_SEQ_ARB_FIFO` (arrival order is all that
+matters there) — it only has an effect under `WEIGHTED`, `STRICT_FIFO`, or
+`STRICT_RANDOM`. This is a common source of "why isn't my priority working"
+confusion: the arbitration mode has to actually consider priority for
+`set_priority()` to do anything.
+
+## `lock()` and `grab()`: exclusive sequencer access
+
+Sometimes a sequence needs to guarantee *nothing else* gets interleaved with
+it for a stretch — a multi-item atomic transaction, for example.
+
+```systemverilog
+task body();
+  sequencer.lock(this);
+  // every item sent between lock() and unlock() is guaranteed
+  // uninterrupted by any other sequence on this sequencer
+  send_first_item();
+  send_second_item();
+  sequencer.unlock(this);
+endtask
+```
+
+`lock()` waits its turn (respects arbitration, doesn't cut the queue) and
+then holds exclusive access until `unlock()`. `grab()` is the impatient
+version — it jumps to the front and takes control immediately, ahead of
+whatever's already arbitrating, then `ungrab()` releases it. Reach for `grab()`
+only for something genuinely urgent (like an injected reset sequence);
+routine "these items must stay together" needs are better served by `lock()`,
+which doesn't unfairly starve other sequences waiting their turn.
+
+## A concrete failure this explains
+
+A background traffic sequence and a directed error-injection sequence run in
+parallel. Without `lock()`/`grab()`, the driver could send one item from the
+directed sequence, then interleave an item from the background sequence,
+then continue the directed sequence — for a directed test that assumes its
+N items arrive back-to-back with nothing else in between, this silently
+breaks the test's actual intent even though every individual item was
+perfectly valid. `lock()` around the directed sequence's `body()` is the fix.
+
+## Interview-ready summary
+
+- Arbitration only matters when multiple sequences are active on the same
+  sequencer at once; the default (`UVM_SEQ_ARB_FIFO`) is arrival order,
+  priority-blind.
+- `set_priority()` only has an effect under `WEIGHTED`/`STRICT_FIFO`/
+  `STRICT_RANDOM` arbitration — it's silently ignored under plain FIFO.
+- `lock()` waits its turn then holds exclusive sequencer access;
+  `grab()` jumps the queue immediately. Use `lock()` unless there's a real
+  reason to cut in line.
+- A sequence assuming its items arrive back-to-back, on a sequencer shared
+  with another active sequence, needs `lock()`/`unlock()` around it — without
+  that, another sequence's items can legally interleave in between.

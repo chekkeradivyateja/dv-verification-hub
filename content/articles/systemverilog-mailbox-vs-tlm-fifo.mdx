@@ -1,0 +1,128 @@
+---
+title: "SystemVerilog Mailbox vs TLM FIFO in UVM: What's the Difference?"
+description: "A mailbox and a uvm_tlm_analysis_fifo solve the same basic problem -- handing data between two concurrent processes -- but they fit very different places in a UVM environment."
+topic: "uvm"
+date: "2026-02-05"
+keywords: ["systemverilog mailbox vs tlm fifo", "uvm_tlm_analysis_fifo example", "mailbox vs analysis port"]
+---
+
+Both are queues one process writes into and another reads from. The real
+question interviewers are testing is whether you know *which layer of the
+testbench* each one belongs to.
+
+## `mailbox`: plain SystemVerilog, point-to-point, blocking
+
+```systemverilog
+mailbox #(my_item) gen2drv = new();
+
+// producer
+task run_gen();
+  forever begin
+    my_item item = new();
+    item.randomize();
+    gen2drv.put(item);   // blocks if the mailbox is full (bounded) 
+  end
+endtask
+
+// consumer
+task run_drv();
+  forever begin
+    my_item item;
+    gen2drv.get(item);   // blocks until something is available
+    drive(item);
+  end
+endtask
+```
+
+A `mailbox` is a built-in SystemVerilog primitive — no UVM required at all.
+It's used in the plain-SV testbench style (see our
+[SystemVerilog constrained random guide](/articles/systemverilog-constrained-random-example)
+for that context): one generator, one consumer, connected directly by name.
+It has no concept of "connect this port to that export" — both sides just
+need a handle to the *same* mailbox object.
+
+## `uvm_tlm_analysis_fifo`: UVM's broadcast-friendly buffered queue
+
+```systemverilog
+class my_scoreboard extends uvm_scoreboard;
+  `uvm_component_utils(my_scoreboard)
+
+  uvm_tlm_analysis_fifo #(my_item) exp_fifo;
+
+  function void build_phase(uvm_phase phase);
+    exp_fifo = new("exp_fifo", this);
+  endfunction
+
+  task run_phase(uvm_phase phase);
+    my_item exp;
+    forever begin
+      exp_fifo.get(exp);   // blocks until the monitor publishes one
+      // compare against actual...
+    end
+  endtask
+endclass
+
+class my_env extends uvm_env;
+  function void connect_phase(uvm_phase phase);
+    // monitor's analysis_port can write to MANY subscribers at once --
+    // the scoreboard's fifo is just one of them.
+    agent.monitor.item_collected_port.connect(sb.exp_fifo.analysis_export);
+  endfunction
+endclass
+```
+
+`uvm_tlm_analysis_fifo` is a UVM-specific class that combines a
+`uvm_analysis_imp` (so it can be a `.connect()` target for a monitor's
+`analysis_port`) with an internal FIFO buffer. Critically, an `analysis_port`
+is **broadcast**, not point-to-point: the same monitor can `.connect()` to a
+scoreboard's fifo *and* a coverage collector's export *and* a checker,
+simultaneously, with zero changes to the monitor. A plain `mailbox` has no
+equivalent to this — it's inherently one writer's handle paired with one
+reader's handle.
+
+## The real distinction
+
+| | `mailbox` | `uvm_tlm_analysis_fifo` |
+|---|---|---|
+| Layer | Plain SystemVerilog | UVM TLM |
+| Topology | Point-to-point (one put-side, one get-side) | Broadcast-compatible (one analysis_port can feed many) |
+| Wiring | Both sides need the same object handle directly | Wired via `.connect()` in `connect_phase`, decoupled by port/export types |
+| Typical use | Generator→driver, monitor→scoreboard in a plain-SV testbench | Monitor→scoreboard/coverage/checker in a UVM testbench |
+| Blocking behavior | `put()`/`get()` block on a bounded mailbox | `write()` from the analysis side never blocks; `get()` on the consumer side blocks |
+
+That last row matters: `analysis_port.write()` is defined to **never block**
+the publisher (a monitor should never stall because a scoreboard is slow) —
+this is why the FIFO buffering exists on the *consumer* side, inside
+`uvm_tlm_analysis_fifo`, not the other way around. A raw `mailbox.put()` on a
+bounded mailbox, by contrast, blocks the producer once the mailbox is full.
+
+## Why UVM doesn't just use mailboxes everywhere
+
+You technically *could* wire monitor-to-scoreboard with a mailbox — nothing
+stops you. The reason UVM environments use TLM connections instead:
+
+- **Reusability**: a component connected via `analysis_port`/`analysis_export`
+  doesn't need to know how many subscribers exist, or even whether any do —
+  the monitor works unmodified whether zero, one, or five things are
+  listening. A mailbox-based monitor would need one mailbox handle per
+  consumer, hardcoded.
+- **Non-blocking publish**: broadcasting via `write()` guarantees the monitor
+  is never stalled by a slow consumer, which a bounded mailbox cannot
+  guarantee.
+- **Standard connection point**: `connect_phase` wiring
+  (`monitor.port.connect(sb.export)`) is a UVM-wide convention every
+  component author expects — a mailbox handle passed some other way isn't.
+
+## Interview-ready summary
+
+- A `mailbox` is a generic SystemVerilog primitive: point-to-point,
+  blocking on both `put()`/`get()`, no UVM dependency.
+- `uvm_tlm_analysis_fifo` is UVM-specific, combines a connectable
+  `analysis_export` with internal buffering, and is built for the
+  broadcast pattern (one monitor, many subscribers) that
+  `uvm_analysis_port.write()` is designed around.
+- `write()` on the publishing side never blocks; that's the entire reason the
+  FIFO buffering lives on the consumer side.
+- Plain SV testbenches use mailboxes because there's no factory/TLM
+  infrastructure at all; UVM testbenches use analysis FIFOs because
+  broadcast + non-blocking publish is what the architecture is built around.

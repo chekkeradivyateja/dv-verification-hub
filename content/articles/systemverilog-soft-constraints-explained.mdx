@@ -1,0 +1,104 @@
+---
+title: "SystemVerilog Soft Constraints Explained (with Example)"
+description: "The difference between a soft and a hard constraint, why soft constraints get silently overridden instead of causing a conflict, and where that's actually useful."
+topic: "sv-basics"
+date: "2026-02-27"
+keywords: ["systemverilog soft constraint example", "soft vs hard constraint", "randomize with soft"]
+---
+
+Our [constrained random guide](/articles/systemverilog-constrained-random-example)
+covers hard constraints — every one of them must hold simultaneously, or
+`randomize()` fails outright. A `soft` constraint is different: it's a
+*default*, not a requirement, and it silently steps aside the moment
+anything else disagrees with it.
+
+## The basic difference
+
+```systemverilog
+class my_item;
+  rand bit [3:0] size;
+
+  constraint c_default_size {
+    soft size == 2;   // "prefer 2, unless something else says otherwise"
+  }
+endclass
+```
+
+Called with no other constraints active, `size` randomizes to `2` every
+time — a soft constraint still applies when nothing contradicts it. The
+difference only shows up the moment something else *does* contradict it.
+
+## What happens when a hard constraint conflicts with a soft one
+
+```systemverilog
+my_item item = new();
+item.randomize() with { size == 5; };  // hard, inline
+```
+
+This succeeds, and `size` becomes `5` — the inline `size == 5` is a **hard**
+constraint (inline `with` constraints are hard by default), and a hard
+constraint always wins over a conflicting soft one. Critically,
+`randomize()` still returns `1` (success) here — a soft/hard conflict is not
+a randomization failure the way two *hard* constraints conflicting would be.
+This is the entire point of `soft`: it's a fallback default, never a
+blocker.
+
+## Why this matters: sensible defaults without hardcoding every test
+
+```systemverilog
+class axi_item;
+  rand bit [31:0] addr;
+  rand bit [2:0]  size;
+
+  constraint c_reasonable_defaults {
+    soft addr inside {[32'h1000 : 32'h1FFF]};  // "typical" address range
+    soft size == 2;                            // "typical" word transfer
+  }
+endclass
+```
+
+Most tests get sensible, realistic default stimulus with zero extra code —
+`item.randomize()` alone produces addresses in the normal range and
+word-sized transfers. A specific corner-case test that needs an address
+*outside* that range just adds one inline hard constraint
+(`randomize() with { addr == 32'hFFFF_0000; }`) and the soft default steps
+aside automatically — no need to touch, disable, or work around the base
+class's constraint at all. Compare this to the alternative of using
+`constraint_mode(0)` to disable a hard constraint (see our
+constrained-random guide) every time a test needs to override a default —
+`soft` constraints make the common case (accepting the default) free and the
+override case (needing something different) a one-line inline constraint,
+instead of the other way around.
+
+## Soft constraints and priority when multiple soft constraints conflict
+
+```systemverilog
+constraint c1 { soft size == 2; }
+constraint c2 { soft size == 4; }
+```
+
+When two *soft* constraints on the same field conflict with each other (and
+nothing hard overrides either), the solver picks based on constraint
+declaration order — generally, a soft constraint declared later takes
+priority over one declared earlier for the same variable. Relying on this
+ordering behavior for anything that actually matters is fragile in
+practice; if you find yourself with genuinely conflicting soft defaults on
+the same field, that's usually a sign the constraint structure itself needs
+rethinking (e.g., moving one of them into a subclass instead), not something
+to resolve by carefully ordering declarations.
+
+## Interview-ready summary
+
+- A `soft` constraint is a default value/range, not a requirement — it
+  applies only when nothing else (hard, or a later-declared soft
+  constraint) disagrees with it.
+- A hard constraint always overrides a conflicting soft one, and
+  `randomize()` still returns success — this is different from two hard
+  constraints conflicting, which causes `randomize()` to fail.
+- Inline `randomize() with {...}` constraints are hard by default — this is
+  exactly what lets a soft base-class default get overridden by one line at
+  a specific call site.
+- The practical value: base transaction classes can declare realistic
+  defaults via `soft`, and individual tests override only what they
+  specifically need to differ, without touching or disabling anything in
+  the base class.

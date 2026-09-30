@@ -1,0 +1,104 @@
+---
+title: "SystemVerilog Interface Clocking Block Explained"
+description: "Why testbenches drive and sample through a clocking block instead of the interface's raw signals, with a worked example showing the race condition it actually prevents."
+topic: "sv-basics"
+date: "2026-02-15"
+keywords: ["systemverilog clocking block example", "clocking block input output skew", "why use clocking block"]
+---
+
+Our [interface vs modport guide](/articles/systemverilog-interface-vs-modport)
+covers direction safety. A clocking block solves a different, subtler
+problem: **timing** safety — making sure a testbench drives and samples
+signals at the right moment relative to the clock, without a race against
+the DUT.
+
+## The race condition clocking blocks prevent
+
+```systemverilog
+// Without a clocking block:
+always @(posedge clk) begin
+  drv.data <= item.data;   // testbench drives on posedge
+end
+// meanwhile the DUT ALSO has: always @(posedge clk) data_reg <= data;
+```
+
+Both the testbench and the DUT are scheduled to react on the exact same
+`posedge clk` event. SystemVerilog's scheduling semantics don't guarantee
+which `always` block runs first among processes sensitive to the same edge
+— this is a genuine, simulator-dependent race, and it's exactly the kind of
+bug that passes on one simulator and fails on another, or passes today and
+fails after an unrelated RTL change shifts scheduling order.
+
+## The clocking block fix
+
+```systemverilog
+interface bus_if (input logic clk);
+  logic [31:0] data;
+  logic        valid;
+  logic        ready;
+
+  clocking cb @(posedge clk);
+    default input #1step output #2;
+    output data, valid;
+    input  ready;
+  endclocking
+
+  modport TB (clocking cb);
+endinterface
+```
+
+`clocking cb @(posedge clk)` declares a clocking block synchronized to
+`posedge clk`. `default input #1step output #2` sets the **skew**: inputs
+are sampled `#1step` *before* the clock edge (capturing the value the
+signal had right before the edge, avoiding any race with the edge itself),
+and outputs are driven `#2` time units *after* the edge (safely after any
+RTL `always @(posedge clk)` block has already reacted to that same edge, so
+the DUT sees the driven value on the *next* edge, not racing this one).
+
+## Using it from the testbench
+
+```systemverilog
+class my_driver extends uvm_driver #(my_item);
+  virtual bus_if.TB vif;
+
+  task drive_item(my_item item);
+    vif.cb.data  <= item.data;    // driven through the clocking block
+    vif.cb.valid <= 1'b1;
+    @(vif.cb);                    // wait for the NEXT clocking event
+    while (!vif.cb.ready) @(vif.cb);
+    vif.cb.valid <= 1'b0;
+  endtask
+endclass
+```
+
+Every drive/sample goes through `vif.cb.<signal>`, never the raw
+`vif.<signal>`. `@(vif.cb)` waits for the clocking block's own synchronized
+event (posedge clk, adjusted by the declared skew) rather than the raw
+`@(posedge vif.clk)` — this is what actually keeps the testbench's timing
+consistently offset from the DUT's, instead of racing it.
+
+## What happens if you skip the clocking block
+
+Driving `vif.data` directly (not `vif.cb.data`) from a plain
+`@(posedge vif.clk)` block reintroduces the exact race described above —
+whether it actually causes a visible bug depends on simulator scheduling
+order, which is precisely why this class of bug is so unpleasant: it can sit
+latent through months of regression, passing purely by scheduling luck,
+until a change somewhere else in the design shifts event ordering and it
+suddenly starts failing with no code change in the area that "broke."
+
+## Interview-ready summary
+
+- A clocking block synchronizes testbench signal access to a specific clock
+  edge with an explicit, declared skew — this is what prevents a race
+  between the testbench driving/sampling and the DUT's own
+  `always @(posedge clk)` logic reacting to the same edge.
+- `input #1step` samples just before the edge (captures the pre-edge,
+  settled value); `output #2` drives shortly after the edge (safely after
+  the DUT's own same-edge logic has already reacted).
+- Access clocking-block signals via `vif.cb.<signal>`, and wait on
+  `@(vif.cb)` — not the raw interface signal or a plain `@(posedge clk)` —
+  or the timing-safety guarantee is gone even though the code still
+  compiles and often still "works" by scheduling luck.
+- This bug class is dangerous specifically because it's non-deterministic
+  across simulators and can lie dormant for a long time before manifesting.

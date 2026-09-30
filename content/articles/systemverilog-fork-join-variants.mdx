@@ -1,0 +1,120 @@
+---
+title: "SystemVerilog fork-join vs fork-join_any vs fork-join_none"
+description: "The three fork/join variants control exactly when the parent process resumes -- a worked example showing the real behavioral difference between all three."
+topic: "sv-basics"
+date: "2026-02-09"
+keywords: ["fork join vs join_any vs join_none", "systemverilog fork join example", "join_none example"]
+---
+
+All three spawn the same thing — one or more concurrent processes from a
+`fork` block. What differs is exactly when the *parent* process (the one
+that executed the `fork`) is allowed to continue past the block.
+
+## `fork...join`: wait for all of them
+
+```systemverilog
+task run_all_agents();
+  fork
+    axi_agent.run();
+    apb_agent.run();
+    monitor_agent.run();
+  join
+  $display("All three agents have finished");
+endtask
+```
+
+The parent process blocks at `join` until **every** forked process
+completes. If `monitor_agent.run()` runs forever (a typical monitor does —
+`forever begin ... end`), this `join` never returns, and `run_all_agents()`
+itself never finishes either. This is the right choice only when every
+forked process is genuinely expected to terminate.
+
+## `fork...join_any`: wait for the first one
+
+```systemverilog
+task wait_for_response_or_timeout();
+  fork
+    begin
+      wait (response_valid);
+      $display("Response arrived");
+    end
+    begin
+      #1000;
+      $display("Timeout!");
+    end
+  join_any
+  disable fork;  // kill whichever branch DIDN'T finish
+endtask
+```
+
+The parent resumes as soon as **any one** of the forked processes completes
+— the others keep running in the background unless explicitly stopped.
+`disable fork` (called from the parent, after `join_any`) kills every
+process forked by *this* parent that's still running — the standard
+idiom for "whichever branch didn't win, stop it now." Without `disable
+fork` here, the timeout branch would keep counting down even after a valid
+response already arrived, and eventually fire a stale, misleading timeout
+message.
+
+## `fork...join_none`: don't wait at all
+
+```systemverilog
+task start_background_traffic();
+  fork
+    background_seq.start(sequencer);
+  join_none
+  $display("Started background traffic, continuing immediately");
+endtask
+```
+
+The parent continues **immediately**, without waiting for the forked
+process to do anything at all — not even to begin executing. The forked
+process runs fully independently from that point on. This is the pattern
+behind `interactive_menu`-style flows where you want something running
+continuously in the background (background stimulus, a continuous monitor)
+while the calling task moves on to other work.
+
+## The classic `join_none` timing bug
+
+```systemverilog
+// BUGGY: i has usually already changed by the time the forked block runs
+for (int i = 0; i < 4; i++) begin
+  fork
+    $display("i = %0d", i);
+  join_none
+end
+```
+
+Because `join_none` doesn't wait for the forked process to even *start*,
+the loop can advance — incrementing `i` — before the forked `$display` block
+actually executes and reads `i`'s value. Depending on simulator scheduling,
+this can print `i = 4` four times instead of `0, 1, 2, 3`. The fix is to
+capture the value into a process-local automatic variable at fork time:
+
+```systemverilog
+for (int i = 0; i < 4; i++) begin
+  automatic int captured = i;
+  fork
+    $display("i = %0d", captured);
+  join_none
+end
+```
+
+This is the exact same class of bug as using a non-`automatic` loop variable
+inside a `fork` in any language with closures over shared loop state — the
+fix (capture a fresh copy per iteration) is the same idea too.
+
+## Interview-ready summary
+
+| | Parent resumes when | Typical use |
+|---|---|---|
+| `join` | All forked processes complete | Every branch is expected to terminate (parallel setup steps) |
+| `join_any` | The first forked process completes | Race a real event against a timeout |
+| `join_none` | Immediately, none have to complete | Fire-and-forget background stimulus/monitoring |
+
+- `disable fork` (called from the parent) kills every still-running process
+  that parent forked — the standard cleanup after `join_any` picks a winner.
+- `join_none` doesn't guarantee the forked process has even started before
+  the parent continues — a loop variable read inside a `join_none` fork
+  needs an `automatic` per-iteration copy, or it can read a value from a
+  later iteration than intended.

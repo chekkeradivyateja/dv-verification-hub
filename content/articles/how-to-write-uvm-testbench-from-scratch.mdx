@@ -1,0 +1,262 @@
+---
+title: "How to Write a UVM Testbench From Scratch (Step-by-Step)"
+description: "The actual build order for a UVM testbench from an empty file -- interface first, then transaction, then sequencer/driver/monitor, then env, then test -- with why that order matters."
+topic: "uvm"
+date: "2026-03-03"
+keywords: ["how to write uvm testbench", "uvm testbench step by step", "uvm testbench from scratch"]
+---
+
+Most UVM tutorials show you the finished files in class-hierarchy order
+(driver, then monitor, then env...) without saying what order to actually
+*write* them in. Writing them in dependency order — each piece only needing
+things that already exist — avoids a lot of "which forward-declaration do I
+need" confusion. This is that order, with why each step comes where it does.
+
+## Step 1: the interface
+
+```systemverilog
+interface dut_if (input logic clk, input logic rst_n);
+  logic [7:0] data_in;
+  logic       valid_in;
+  logic       ready_out;
+  logic [7:0] data_out;
+
+  modport TB (output data_in, valid_in, input ready_out, data_out, clk, rst_n);
+endinterface
+```
+
+Everything else in the testbench eventually needs a virtual handle to this,
+so it has to exist first. See our
+[interface vs modport guide](/articles/systemverilog-interface-vs-modport)
+and [clocking block guide](/articles/systemverilog-interface-clocking-block)
+for what belongs here beyond the bare signals.
+
+## Step 2: the sequence item (transaction)
+
+```systemverilog
+class dut_item extends uvm_sequence_item;
+  rand bit [7:0] data_in;
+
+  `uvm_object_utils_begin(dut_item)
+    `uvm_field_int(data_in, UVM_ALL_ON)
+  `uvm_object_utils_end
+
+  function new(string name = "dut_item");
+    super.new(name);
+  endfunction
+endclass
+```
+
+This has no dependency on anything else you'll write — it only needs the
+interface's *shape* to be known in your head (which fields matter), not the
+interface class itself. See our
+[sequence vs sequence item guide](/articles/uvm-sequence-vs-sequence-item)
+for the reasoning behind this split.
+
+## Step 3: sequencer (trivial, needs only the item)
+
+```systemverilog
+class dut_sequencer extends uvm_sequencer #(dut_item);
+  `uvm_component_utils(dut_sequencer)
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+  endfunction
+endclass
+```
+
+## Step 4: driver (needs the item and the interface)
+
+```systemverilog
+class dut_driver extends uvm_driver #(dut_item);
+  `uvm_component_utils(dut_driver)
+  virtual dut_if.TB vif;
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+  endfunction
+
+  function void build_phase(uvm_phase phase);
+    if (!uvm_config_db#(virtual dut_if.TB)::get(this, "", "vif", vif))
+      `uvm_fatal("NOVIF", "virtual interface not set")
+  endfunction
+
+  task run_phase(uvm_phase phase);
+    forever begin
+      dut_item item;
+      seq_item_port.get_next_item(item);
+      vif.data_in  <= item.data_in;
+      vif.valid_in <= 1'b1;
+      @(posedge vif.clk);
+      while (!vif.ready_out) @(posedge vif.clk);
+      vif.valid_in <= 1'b0;
+      seq_item_port.item_done();
+    end
+  endtask
+endclass
+```
+
+## Step 5: monitor (needs the item and the interface, not the driver)
+
+```systemverilog
+class dut_monitor extends uvm_monitor;
+  `uvm_component_utils(dut_monitor)
+  virtual dut_if.TB vif;
+  uvm_analysis_port #(dut_item) item_collected_port;
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+    item_collected_port = new("item_collected_port", this);
+  endfunction
+
+  function void build_phase(uvm_phase phase);
+    if (!uvm_config_db#(virtual dut_if.TB)::get(this, "", "vif", vif))
+      `uvm_fatal("NOVIF", "virtual interface not set")
+  endfunction
+
+  task run_phase(uvm_phase phase);
+    forever begin
+      @(posedge vif.clk);
+      if (vif.valid_in && vif.ready_out) begin
+        dut_item item = dut_item::type_id::create("item");
+        item.data_in = vif.data_in;
+        item_collected_port.write(item);
+      end
+    end
+  endtask
+endclass
+```
+
+Driver and monitor are independent of each other — writing them in either
+order is fine, they're both leaf components that only need the item and the
+interface.
+
+## Step 6: a basic sequence (needs only the item)
+
+```systemverilog
+class basic_seq extends uvm_sequence #(dut_item);
+  `uvm_object_utils(basic_seq)
+  function new(string name = "basic_seq");
+    super.new(name);
+  endfunction
+
+  task body();
+    repeat (10) begin
+      dut_item item = dut_item::type_id::create("item");
+      start_item(item);
+      if (!item.randomize())
+        `uvm_error(get_type_name(), "Randomization failed")
+      finish_item(item);
+    end
+  endtask
+endclass
+```
+
+## Step 7: agent (assembles sequencer + driver + monitor)
+
+```systemverilog
+class dut_agent extends uvm_agent;
+  `uvm_component_utils(dut_agent)
+  dut_driver    driver;
+  dut_sequencer sequencer;
+  dut_monitor   monitor;
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+  endfunction
+
+  function void build_phase(uvm_phase phase);
+    monitor = dut_monitor::type_id::create("monitor", this);
+    if (get_is_active() == UVM_ACTIVE) begin
+      driver    = dut_driver::type_id::create("driver", this);
+      sequencer = dut_sequencer::type_id::create("sequencer", this);
+    end
+  endfunction
+
+  function void connect_phase(uvm_phase phase);
+    if (get_is_active() == UVM_ACTIVE)
+      driver.seq_item_port.connect(sequencer.seq_item_export);
+  endfunction
+endclass
+```
+
+This is the first piece that genuinely needs everything from steps 2-5 to
+already exist — which is exactly why it comes after them, not before. See
+our [active vs passive agent guide](/articles/uvm-agent-active-vs-passive)
+for the `is_active` branching used here.
+
+## Step 8: environment (assembles the agent, adds a scoreboard)
+
+```systemverilog
+class dut_env extends uvm_env;
+  `uvm_component_utils(dut_env)
+  dut_agent agent;
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+  endfunction
+
+  function void build_phase(uvm_phase phase);
+    agent = dut_agent::type_id::create("agent", this);
+  endfunction
+endclass
+```
+
+## Step 9: test (the top of the hierarchy, run last because it needs everything below it)
+
+```systemverilog
+class basic_test extends uvm_test;
+  `uvm_component_utils(basic_test)
+  dut_env env;
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+  endfunction
+
+  function void build_phase(uvm_phase phase);
+    env = dut_env::type_id::create("env", this);
+  endfunction
+
+  task run_phase(uvm_phase phase);
+    basic_seq seq = basic_seq::type_id::create("seq");
+    phase.raise_objection(this);
+    seq.start(env.agent.sequencer);
+    phase.drop_objection(this);
+  endtask
+endclass
+```
+
+## Step 10: top-level module (instantiates the interface, DUT, and calls `run_test`)
+
+```systemverilog
+module tb_top;
+  logic clk = 0;
+  logic rst_n = 0;
+  always #5 clk = ~clk;
+
+  dut_if intf(clk, rst_n);
+  my_dut dut(.clk(clk), .rst_n(rst_n),
+             .data_in(intf.data_in), .valid_in(intf.valid_in),
+             .ready_out(intf.ready_out), .data_out(intf.data_out));
+
+  initial begin
+    uvm_config_db#(virtual dut_if.TB)::set(null, "*", "vif", intf.TB);
+    #20 rst_n = 1;
+    run_test("basic_test");
+  end
+endmodule
+```
+
+`run_test()` is the actual entry point — everything above it exists so that
+by the time this line runs, the whole component hierarchy can build itself
+correctly through `build_phase`/`connect_phase`.
+
+## Interview-ready summary
+
+The dependency order that makes this buildable without forward-reference
+headaches: **interface → item → sequencer/driver/monitor (leaf components,
+order among these three doesn't matter) → sequence → agent → env → test →
+top module**. Each step only ever needs things that already exist by the
+time you write it — the reason tutorials that jump straight to "here's the
+driver" without this context are confusing is that the driver silently
+assumes the interface and item already exist, which is exactly the
+dependency this order makes explicit.
