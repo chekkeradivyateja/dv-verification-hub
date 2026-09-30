@@ -1,20 +1,31 @@
 "use client";
 
-import { useState } from "react";
+import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import Link from "next/link";
 import type { ArticleSummary } from "@/lib/articles";
 import { TOPIC_LABELS, type ArticleTopic } from "@/lib/site";
 
 export default function ArticleFilters({ articles }: { articles: ArticleSummary[] }) {
-  const [active, setActive] = useState<ArticleTopic | "all">("all");
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  // Driven directly by the URL (not local state) so a tab click is a real
+  // browser-history entry: pressing Back/Forward moves between topic
+  // filters instead of leaving the page entirely, on any device.
+  const active = (searchParams.get("topic") as ArticleTopic | null) ?? "all";
   const topics = Array.from(new Set(articles.map((a) => a.topic)));
   const visible = active === "all" ? articles : articles.filter((a) => a.topic === active);
+
+  function selectTopic(topic: ArticleTopic | "all") {
+    const qs = topic === "all" ? "" : `?topic=${topic}`;
+    router.push(`${pathname}${qs}`, { scroll: false });
+  }
 
   return (
     <div>
       <div className="flex flex-wrap gap-2 mb-8">
         <button
-          onClick={() => setActive("all")}
+          onClick={() => selectTopic("all")}
           className={`rounded-full px-3 py-1.5 text-xs font-mono border transition-colors ${
             active === "all"
               ? "border-accent bg-accent-soft text-accent-strong"
@@ -26,7 +37,7 @@ export default function ArticleFilters({ articles }: { articles: ArticleSummary[
         {topics.map((topic) => (
           <button
             key={topic}
-            onClick={() => setActive(topic)}
+            onClick={() => selectTopic(topic)}
             className={`rounded-full px-3 py-1.5 text-xs font-mono border transition-colors ${
               active === topic
                 ? "border-accent bg-accent-soft text-accent-strong"

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import ArticleFilters from "@/components/ArticleFilters";
 import { getAllArticles } from "@/lib/articles";
 import { SITE_URL } from "@/lib/site";
@@ -22,7 +23,9 @@ export default function ArticlesIndexPage() {
         actually search for. New ones added regularly.
       </p>
       <div className="mt-10">
-        <ArticleFilters articles={articles} />
+        <Suspense fallback={null}>
+          <ArticleFilters articles={articles} />
+        </Suspense>
       </div>
     </div>
   );

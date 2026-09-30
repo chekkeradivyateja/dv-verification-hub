@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import {
   QUESTIONS,
   QUESTION_TOPIC_LABELS,
@@ -8,17 +9,28 @@ import {
 } from "@/lib/questions";
 
 export default function QuestionBank() {
-  const [active, setActive] = useState<QuestionTopic | "all">("all");
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  // Driven directly by the URL (not local state) so a tab click is a real
+  // browser-history entry: pressing Back/Forward moves between topic
+  // filters instead of leaving the page entirely, on any device.
+  const active = (searchParams.get("topic") as QuestionTopic | null) ?? "all";
   const [openId, setOpenId] = useState<string | null>(null);
 
   const visible = active === "all" ? QUESTIONS : QUESTIONS.filter((q) => q.topic === active);
   const topics = Object.keys(QUESTION_TOPIC_LABELS) as QuestionTopic[];
 
+  function selectTopic(topic: QuestionTopic | "all") {
+    const qs = topic === "all" ? "" : `?topic=${topic}`;
+    router.push(`${pathname}${qs}`, { scroll: false });
+  }
+
   return (
     <div>
       <div className="flex flex-wrap gap-2 mb-8">
         <button
-          onClick={() => setActive("all")}
+          onClick={() => selectTopic("all")}
           className={`rounded-full px-3 py-1.5 text-xs font-mono border transition-colors ${
             active === "all"
               ? "border-accent bg-accent-soft text-accent-strong"
@@ -30,7 +42,7 @@ export default function QuestionBank() {
         {topics.map((topic) => (
           <button
             key={topic}
-            onClick={() => setActive(topic)}
+            onClick={() => selectTopic(topic)}
             className={`rounded-full px-3 py-1.5 text-xs font-mono border transition-colors ${
               active === topic
                 ? "border-accent bg-accent-soft text-accent-strong"

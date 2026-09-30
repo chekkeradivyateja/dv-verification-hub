@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import CtaCard from "@/components/CtaCard";
 import QuestionBank from "@/components/QuestionBank";
 import { SITE_URL } from "@/lib/site";
@@ -22,7 +23,9 @@ export default function InterviewQuestionsPage() {
         and click a question to reveal the answer.
       </p>
       <div className="mt-10">
-        <QuestionBank />
+        <Suspense fallback={null}>
+          <QuestionBank />
+        </Suspense>
       </div>
       <CtaCard topic="uvm" />
     </div>
