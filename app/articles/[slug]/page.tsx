@@ -5,7 +5,7 @@ import { MDXRemote } from "next-mdx-remote/rsc";
 import CtaCard from "@/components/CtaCard";
 import { mdxComponents } from "@/components/MdxComponents";
 import { getArticleSlugs, getArticleSource } from "@/lib/articles";
-import { SITE_URL, TOPIC_LABELS } from "@/lib/site";
+import { SITE_NAME, SITE_URL, TOPIC_LABELS } from "@/lib/site";
 
 export function generateStaticParams() {
   return getArticleSlugs().map((slug) => ({ slug }));
@@ -48,8 +48,26 @@ export default async function ArticlePage({ params }: PageProps<"/articles/[slug
 
   const { content, frontmatter } = getArticleSource(slug);
 
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    headline: frontmatter.title,
+    description: frontmatter.description,
+    datePublished: frontmatter.date,
+    dateModified: frontmatter.date,
+    author: { "@type": "Person", name: "Teja" },
+    publisher: { "@type": "Organization", name: SITE_NAME, url: SITE_URL },
+    mainEntityOfPage: { "@type": "WebPage", "@id": `${SITE_URL}/articles/${slug}` },
+    image: `${SITE_URL}/og/${slug}.png`,
+    keywords: frontmatter.keywords?.join(", "),
+  };
+
   return (
     <article className="mx-auto max-w-3xl px-4 sm:px-6 py-16">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
       <Link href="/articles" className="text-sm text-accent-strong hover:underline">
         &larr; All articles
       </Link>
