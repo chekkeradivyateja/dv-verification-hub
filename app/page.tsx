@@ -135,7 +135,17 @@ export default function Home() {
             spent the last couple of years hands-on with AMBA protocol
             verification (AXI/AHB/APB), DDR/memory controllers, and UVM
             testbenches across VCS, Questa, and Xcelium &mdash; the examples
-            here come from that day-to-day work, not a textbook.
+            here come from that day-to-day work, not a textbook. I&rsquo;m
+            also building{" "}
+            <a
+              href="https://verechek-website.vercel.app"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-accent-strong hover:underline"
+            >
+              VereChek
+            </a>
+            , an AI-assisted RTL-to-testbench tool, currently in early access.
           </p>
         </div>
         <div>
