@@ -34,5 +34,8 @@
     "tailwindcss": "^4",
     "tsx": "^4.23.13",
     "typescript": "^5"
+  },
+  "overrides": {
+    "fflate": "^0.8.3"
   }
 }
